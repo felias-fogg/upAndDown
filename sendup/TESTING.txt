@@ -1,0 +1,82 @@
+setup: test all reasons
+* POR_REASON 1
+* EXTR_REASON 2
+* WDR_SETUP_REASON 3
+* WDR_MAIN_REASON 4
+* WDR_SLEEP_REASON 5
+* BOR_REASON 6
+
+errors:
+* TWI_ERROR 
+* PROMID_ERROR 
+* CRC_ERROR 
+* TEMP_OUTLIER_ERROR 
+* PRESS_OUTLIER_ERROR 
+* WAKEUP_ERROR 
+* STATE_ERROR 
+* BATT_ERROR 
+* BROWN_OUT_ERROR 
+* UNDEF_RESTART_ERROR 
+* OSCCAL_ERROR 
+* INTREF_ERROR 
+* FUSE_ERROR 
+
+states entering:
+* BYE_STATE 1
+* SLEEP_STATE 2
+* WAKEUP_STATE 3
+* EXPLAIN_STATE 4
+* CLIMB_STATE 5
+* THANKS_STATE 6
+* SUMMIT_STATE 7
+* ERROR_STATE 8
+* TRANSPORT_STATE 9
+* DEEPSLEEP_STATE 10
+* RESET_STATE 11
+* STATISTICS_STATE 12
+
+states leaving:
+* BYE_STATE 1 *> SLEEP_STATE
+* SLEEP_STATE 2 (*> WAKEUP_STATE)
+* WAKEUP_STATE 3 *> EXPLAIN_STATE  *> SLEEP_STATE
+* EXPLAIN_STATE 4 *> CLIMB_STATE
+* CLIMB_STATE 5 *> THANKS_STATE *> SLEEP_STATE
+* THANKS_STATE 6 *> SUMMIT_STATE
+* SUMMIT_STATE 7 *> CLIMB_STATE
+* ERROR_STATE 8 *> BYE_STATE
+* TRANSPORT_STATE 9 *> DEEP_SLEEP_STATE
+* DEEPSLEEP_STATE 10 *> RESET_STATE
+* RESET_STATE 11 *> WAKEUP_STATE
+* STATISTICS_STATE 12 *> BYE_STATE
+* additinonally, every state can be left by waiting MINQUIET time
+  *> BYE_STATE
+
+height computation:
+* metric
+- imperial
+* epsilon!
+
+bump recognition:
+* check by testing timeout
+
+special entries using RESET press codes:
+* transport
+* reset
+* statistics
+
+statistics taken:
+* totalsecs
+* wakesecs
+* totalwakeups
+* totalclimbs
+* totalsummits
+* totalstat
+
+* error recovery (power cycling)
+
+Power consumption:
+MCU idle (everything else shut off): 0.9 mA
+MCU sleeping completely: 200 nA (10M)
+MCU sleeping with WDT: 5 microA
+MCU active measuring and displaying: 6 mA
+
