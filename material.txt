@@ -1,0 +1,15 @@
+Platine				3,50
+Lithiumbatterie        	3,50
+Attiny86				2,85
+Vibrationsschalter		3,15
+Taster                		0,20
+7-Segementanzeige    	1,57
+Fassung				0,78
+Hühnerfutter            	0,50
+Petling 15cm            	0,75
+MS5611			      14,90
+Porto for MS5611	        8,90
+                                --------
+Summe                  	      40,60
+
+Für den Sensor bei ebay 13,80 statt 23,80 -> Summe 30,60!
