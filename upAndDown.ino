@@ -5,7 +5,22 @@
    Developed on an Arduino Pro Mini, deployed on a Attiny84.
    PCB is the Open-V2 board that fits together with a 3.6V/2400mA lithium
    battery into a preform tube (15cm)
+
+   ATtiny Fusebits: Divide clock by 8, Brown-out disabled
+   Arduino board: ATtiny 84 / 1MHz
 */
+
+#define Version "2.2"
+
+/* Version 0.9 - first version out in the wild
+ * Version 1.0 - switched to SoftI2CMaster (faster and less memory consumption)
+ * Version 2.0 - improved power saving
+ * Version 2.1 - simplified, less states, output only when key pressed, 
+ *               no scpecial descend mode, sleep only after 5 minutes 
+ *               after inactivity
+ * Version 2.2 - removed bug introduced by using idleDelay - to inaccurate!
+ */
+
 // #define ENGLISH // all messages in English
 
 // #define DEB_LCD
@@ -13,30 +28,24 @@
 // #define DEB_LED
 // #define DEB_LEDRAM
 // #define DEB_LEDBATT
+// #define DEB_LEDHEIGHT
+// #define DEB_LEDSTABLE
 
 #define DISPLAY_ON_MSECS 1000 // msecs on
 #define DISPLAY_OFF_MSECS 300 // msecs off
-#define COORDSHOW 4 // show coords this number of times
 #define MAXERRCNT 10 // after that many measurement errors we give up
 #define MAXRETRYCNT 5 // number of retries in reset and param command
 #define LOWVOLT_WARN 2.8 // warning that battery is low
-#define LOWVOLT_ERR 2.2 // with that we do not startup anymore!
+#define LOWVOLT_ERR 2.3 // with that we do not startup anymore!
 #define VOLTSPLIT 4.5
 #define VOLTHIGHCOEFF 0.17
 #define VOLTLOWCOEFF 0.05
 
-#define METER_UP 6
-#define EPSILON 1
-#define EPSILON2 3
-#define MAXTIME 1800 // 1/2 hrs maxtime
-#define MAXWAKEUP_NOBUMP 60 // if there is no bump, we go to sleep again 
-#define MAXWAKEUP_TOTAL 360 // 6 minutes for wakeup & start climbing
-#define WAKEUP_ASK 120 // 1 minute, then we ask
-#define MAXEPSILON2 120 // 2 minutes above epsilon2 measn we are there
-#define MINQUIET 90 // 1.5 minutes no bump means we are back in the box
-#define MAXCLIMB 900 // 15 minutes to climb to top
-#define MAXDISPLAY_SUMMIT_TIME 40 
-#define MAXREQUEST_DISPLAY_TIME 45
+#define METER_UP 33.0
+#define EPSILON (METER_UP/5.0)
+#define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
+#define MAXWAKEUP_TOTAL 480 // 8 minutes for wakeup & start climbing
+#define MINQUIET 300 // 5 minutes no bump means we are back in the box
 
 /* error codes */
 #define NO_ERROR 0
@@ -46,8 +55,9 @@
 #define TEMP_ERROR 4
 #define PRESS_ERROR 5
 #define NOBUMP_ERROR 6
-#define TOOLONG_ERROR 7
-#define STATE_ERROR 8
+#define HEIGHT_ERROR 7
+#define WAKEUP_ERROR 8
+#define STATE_ERROR 9
 
 
 #if (__AVR_ARCH__  == 5) // means ATMEGA 
@@ -77,8 +87,8 @@
    On breadboard connect:
    Attiny-Pin   Arduino(Attiny)   Arduino(ProMini)     External
    PA0          D0                D2                   Vibration switch
-   PA1          D1                D3                   MS5611 SDA 
-   PA2          D2                D4                   MS5611 SCL
+   PA1          D1                D3                   MS5611 SCL
+   PA2          D2                D4                   MS5611 SDA
                                                        MS5611 Vcc
 						       MS5611 GND
    PA3          D3                D5                   Disp. Pin1(g) 
@@ -103,7 +113,7 @@
 #include <avr/sleep.h>
 #include <avr/eeprom.h>
 #include <avr/pgmspace.h>
-#include <I2cMaster.h> // mod. to include the software only version for Attiny
+
 
 #if defined(ATMEGA) && defined(DEB_LCD)
 #include <Adafruit_GFX.h>
@@ -117,12 +127,22 @@ Adafruit_PCD8544 lcd = Adafruit_PCD8544(13,14,15,17,16);
 #define POFF 2
 #define T1_vect TIMER1_OVF_vect
 #define PCINT_vect PCINT2_vect
+#define SDA_PORT PORTD
+#define SDA_PIN 2
+#define SCL_PORT PORTD
+#define SCL_PIN 1
 #else
 #define VOLTOFFSET -0.08
 #define POFF 0
 #define T1_vect TIM1_OVF_vect
 #define PCINT_vect PCINT0_vect
+#define SDA_PORT PORTA
+#define SDA_PIN 2
+#define SCL_PORT PORTA
+#define SCL_PIN 1
 #endif
+
+#include <SoftI2CMaster.h>
 
 #if  defined(DEB_TTY) && defined(ATMEGA)
 #define DEBTTY_PRINT(str) \
@@ -258,25 +278,21 @@ const char circle[] = { LASTCHAR+1, LASTCHAR+2, LASTCHAR+3, LASTCHAR+4,
 
 /* messages */
 #ifdef ENGLISH
-prog_char summit_str[] PROGMEM = "GOTO N123 E456.";
-prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
-prog_char emptybatt_str[] PROGMEM = "BATT EMPTY. ";
-prog_char pressme_str[] PROGMEM = "PRESS BUTTON.";
-prog_char up_str[] PROGMEM ="UP ";
-prog_char meter_str[] PROGMEM =" M.  ";
-prog_char down_str[] PROGMEM = "DOWNHILL.";
-prog_char bye_str[] PROGMEM = "BYE.";
-prog_char error_str[] PROGMEM = "  ERROR";
+const prog_char summit_str[] PROGMEM = "CODE 4213.";
+const prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
+const prog_char up_str[] PROGMEM ="UP";
+const prog_char meter_str[] PROGMEM ="M";
+const prog_char bye_str[] PROGMEM = "BYE.";
+const prog_char error_str[] PROGMEM = "  ERROR";
+const prog_char sleep_str[] PROGMEM = "SP";
 #else
-prog_char summit_str[] PROGMEM = "CODE 456.";
-prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
-prog_char emptybatt_str[] PROGMEM = " BATT LEER. ";
-prog_char pressme_str[] PROGMEM = "DRUECKEN.";
-prog_char up_str[] PROGMEM ="HOCH ";
-prog_char meter_str[] PROGMEM =" M. ";
-prog_char down_str[] PROGMEM = "RUNTER.";
-prog_char bye_str[] PROGMEM = "BYE.";
-prog_char error_str[] PROGMEM = "  FEHLER";
+const prog_char summit_str[] PROGMEM = "CODE 4213.";
+const prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
+const prog_char up_str[] PROGMEM ="HOCH";
+const prog_char meter_str[] PROGMEM ="M";
+const prog_char bye_str[] PROGMEM = "BYE.";
+const prog_char error_str[] PROGMEM = "  FEHLER";
+const prog_char sleep_str[] PROGMEM = "SP";
 #endif
 
 
@@ -286,27 +302,24 @@ prog_char error_str[] PROGMEM = "  FEHLER";
 #define NO_STATE 0
 #define SLEEP_STATE 1
 #define WAKEUP_STATE 2
-#define PRESS_ME_STATE 3
-#define REQUEST_UP_STATE 4
-#define CLIMB_STATE 5
-#define SUMMIT_STATE 6
-#define DESCEND_STATE 7
-#define BATT_LOW_STATE 8
-#define ERROR_STATE 9
-#define LAST_STATE 9
+#define CLIMB_STATE 3
+#define SUMMIT_STATE 4
+#define BATT_LOW_STATE 5
+#define ERROR_STATE 6
+#define DEEPSLEEP_STATE 7
+#define LAST_STATE 7
 
 
 #if defined(ATMEGA) && (defined(DEB_TTY) || defined(DEB_LCD))
-char statestr[14][12] = { "UNDEF", "SLEEP", "WAKEUP", "PRESS ME",
-		      "REQUEST UP", "CLIMB", "SUMMIT", "DESCEND", 
-		      "BATT LOW", "ERROR" };
+char statestr[14][12] = { "UNDEF", "SLEEP", "WAKEUP", 
+			  "CLIMB", "SUMMIT", "BATT_LOW", "ERROR", 
+			  "DEEP_SLEEP" };
 #endif
 
 
 /* magic keys - to find out whether reset is a startup */
 #define MKEY1 0x7109
 #define MKEY2 0xFD1E
-#define MKEY3 0x5231
 
 /***** super global variables (surviving resets) *****/
 // The state var
@@ -321,17 +334,13 @@ uint16_t lastbump __attribute__ ((section (".noinit")));
 uint16_t lastpress __attribute__ ((section (".noinit"))); 
 // last time, the state was changed
 uint16_t lastchange __attribute__ ((section (".noinit"))); 
-// last time, we passed epsilon2
-uint16_t lastepsilon2 __attribute__ ((section (".noinit"))); 
 // reference pressure for 0 level
 float refPress __attribute__ ((section (".noinit"))); 
-// actual summit height
-float summitheight __attribute__ ((section (".noinit"))); 
+uint8_t sleeplevel __attribute__ ((section (".noinit")));
 
 uint16_t magickey1 __attribute__ ((section (".noinit"))); 
-uint16_t magickey2 __attribute__ ((section (".noinit"))); 
 
-uint16_t eemagickey3[1] EEMEM;
+uint16_t eemagickey2[1] EEMEM;
 uint8_t eelowvolterr[1] EEMEM;
 
 /***** global vars ****/
@@ -353,7 +362,7 @@ volatile unsigned char dispchar = ' ';
 uint16_t C[7];
 
 // MS5611 variables
-SoftI2cMaster baro(SDA_PIN,SCL_PIN);
+// SoftI2cMaster baro(SDA_PIN,SCL_PIN);
 
 ISR(T1_vect)
 {
@@ -390,21 +399,36 @@ void stopTimerOne(void) {
   TIMSK1 = 0;
 }
 
+void idleDelay(unsigned int msecs)
+{
+  unsigned long start;
+
+  // millis() is very inaccurate, so we use delay() for everything <= 50 msec
+  if (msecs <= 50) delay(msecs);
+  else { 
+    start = millis();
+    while (millis() - start < msecs) {
+      set_sleep_mode(SLEEP_MODE_IDLE);
+      sleep_mode();
+    }
+  }
+}
+
+
 void displayChar(char c) 
 {
   dispchar = c;
-  delay(DISPLAY_ON_MSECS);
+  idleDelay(DISPLAY_ON_MSECS);
   dispchar = ' ';
-  delay(DISPLAY_OFF_MSECS);
+  idleDelay(DISPLAY_OFF_MSECS);
 }
 
-void displayPString(prog_char *mess)
+void displayPString(const prog_char *mess)
 {
   char c;
   while (c = pgm_read_byte(mess++)) {
     displayChar(c);
   }
-  displayChar(' ');
 }
 
 void displayNum(int num)
@@ -427,17 +451,17 @@ void displayNum(int num)
 float getAltiVal(byte code)
 {
   float ret = 0;
-  if (!baro.start(ADDRESS | I2C_WRITE)) return ERRORVAL;
-  if (!baro.write(code)) return ERRORVAL;
-  baro.stop();
-  delay(10);
+  if (!i2c_start(ADDRESS | I2C_WRITE)) return ERRORVAL;
+  if (!i2c_write(code)) return ERRORVAL;
+  i2c_stop();
+  idleDelay(15); // at least 10, 15 is on the safe side
   // start read sequence
-  if (!baro.start(ADDRESS | I2C_WRITE)) return ERRORVAL;
-  if (!baro.write(0x00)) return ERRORVAL; // request ADC vals
-  baro.stop();
-  if (!baro.start(ADDRESS | I2C_READ)) return ERRORVAL;
-  ret = baro.read(false) * 65536.0 + baro.read(false) * 256.0 + baro.read(true);
-  baro.stop();
+  if (!i2c_start(ADDRESS | I2C_WRITE)) return ERRORVAL;
+  if (!i2c_write(0x00)) return ERRORVAL; // request ADC vals
+  i2c_stop();
+  if (!i2c_start(ADDRESS | I2C_READ)) return ERRORVAL;
+  ret = i2c_read(false) * 65536.0 + i2c_read(false) * 256.0 + i2c_read(true);
+  i2c_stop();
   return ret;
 }
 
@@ -446,20 +470,20 @@ void resetAlti(void)
   int retrycnt = 0;
   bool fail = true;
   while (fail && retrycnt++ < MAXRETRYCNT && errcnt < MAXERRCNT) {
-    baro.start(0 | I2C_WRITE);
-    baro.stop();
-    delay(5);
-    if (baro.start(ADDRESS | I2C_WRITE)) 
-      if (baro.write(0x1E)) {
-	baro.stop();
-	delay(3);
+    i2c_start(0 | I2C_WRITE);
+    i2c_stop();
+    idleDelay(5);
+    if (i2c_start(ADDRESS | I2C_WRITE)) 
+      if (i2c_write(0x1E)) {
+	i2c_stop();
+	idleDelay(6);
 	fail = false;
       }
     if (fail) {
       errcnt++;
       errcode = RESET_ERROR;
       DEBTTY_PRINTLN(F("Reset command unsuccessfull"))
-      delay(5);
+	idleDelay(10);
     }
   }
   if (fail) {
@@ -477,19 +501,19 @@ void paramAlti(void)
   while (fail && retrycnt++ < MAXRETRYCNT && errcnt < MAXERRCNT) {
     fail = false;
     for (int i=0; i<6 && !fail ; i++) {
-      if (!baro.start(ADDRESS | I2C_WRITE)) fail = true;
-      if (!fail && !baro.write(0xA2 + i*2)) fail = true;
-      baro.stop();
-      if (!fail && !baro.start(ADDRESS | I2C_READ)) fail = true;
-      C[i+1] = baro.read(false) << 8 | baro.read(true);
-      baro.stop();
+      if (!i2c_start(ADDRESS | I2C_WRITE)) fail = true;
+      if (!fail && !i2c_write(0xA2 + i*2)) fail = true;
+      i2c_stop();
+      if (!fail && !i2c_start(ADDRESS | I2C_READ)) fail = true;
+      C[i+1] = i2c_read(false) << 8 | i2c_read(true);
+      i2c_stop();
       DEBTTY_PRINTLN(C[i+1])
       if (fail) {
 	DEBTTY_PRINTLN(F("Prom command unsuccessfull"))
 	errcode = PARAM_ERROR;
 	errcnt++;
 	resetAlti(); // try another reset
-	delay(5);
+	idleDelay(10);
       }
     }
     DEBTTY_PRINTLN("")
@@ -499,7 +523,6 @@ void paramAlti(void)
     DEBTTY_PRINTLN(F("*** Fatal error in prom command"))
   }
 }
-
 
 float measurePress(int count)
 {
@@ -582,11 +605,34 @@ float measurePress(int count)
   return (acc/count);
 }
 
+float measurePressWithRecovery(int count)
+{
+  float result;
+  bool cont = true;
+  int retrycnt = 3;
+
+  while (retrycnt-- && cont) {
+    result = measurePress(count);
+    if (errcnt >= MAXERRCNT && retrycnt) {
+      errcnt = 0;
+      errcode = NO_ERROR;
+      resetAlti();
+      idleDelay(20);
+      paramAlti();
+      idleDelay(20);
+    } else cont = false;
+  }
+  return result;
+}
+
 
 float readVoltage(void)
 {
   int reading;
   float result;
+
+  ADCSRA |= (1<<ADEN); // switch on ADC  
+  idleDelay(20);
 
 #ifdef ATMEGA
   ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
@@ -594,7 +640,7 @@ float readVoltage(void)
   ADMUX = _BV(MUX5) | _BV(MUX0);
 #endif
 
-  delay(20); // Wait for Vref to settle
+  idleDelay(20); // Wait for Vref to settle
   ADCSRA |= _BV(ADSC); // Convert
   while (bit_is_set(ADCSRA,ADSC));
   reading = ADCL;
@@ -610,6 +656,7 @@ float readVoltage(void)
   DEBTTY_PRINT(F("Voltage:  "))
   DEBTTY_PRINTLN(result)
 
+  ADCSRA &= ~(_BV(ADEN)); // switch off ADC
   return result;
 }
 
@@ -677,7 +724,6 @@ void IOoff(void) {
   for (i=0;i<8;i++) {
     digitalWrite(lcd_seg[i],LOW);
   }
-  ADCSRA &= ~(1<<ADEN); // switch off ADC
   stopTimerOne();
 }
 
@@ -688,7 +734,6 @@ void setupIO(void)
   enablePinChangeIRQ();
   wdt_enable(WDTO_1S);
   WDTCSR |= (1<<WDIE); // enable WDT interrupt instead of reset
-  ADCSRA |= (1<<ADEN); // switch on ADC  
 }
 
 void setSeconds(uint16_t &var)
@@ -707,6 +752,14 @@ uint16_t getSeconds(void)
   return res;
 }
 
+void gosleep(void)
+{
+  wdt_disable(); // no more seconds counting
+  IOoff(); // no more IO
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  sleep_mode(); // sleep & wait for reset
+}
+
 void setup() {
 #if defined(ATMEGA) && defined(DEB_TTY)
   Serial.begin(19200); 
@@ -714,15 +767,17 @@ void setup() {
 #if defined(ATMEGA) && defined(DEB_LCD)
   lcd.begin();
 #endif
-
+  i2c_init();
   if (magickey1 == MKEY1 && 
-      magickey2 == MKEY2 && 
-      eeprom_read_word(&eemagickey3[0]) == MKEY3) {
+      eeprom_read_word(&eemagickey2[0]) == MKEY2) {
     DEBTTY_PRINTLN(F("Reset pressed"));
+    if (sleeplevel == 1) sleeplevel = 2;
+    if (sleeplevel == 3) sleeplevel = 4;
   } else {
     DEBTTY_PRINTLN(F("Startup..."));
     DEBTTY_PRINT(F("Free ram:"));
     DEBTTY_PRINTLN(freeRam());
+    sleeplevel = 0;
     pressed = false; // startup reset
     bumped = false;
     state = SLEEP_STATE;
@@ -730,22 +785,20 @@ void setup() {
     lastpress = 0;
     lastbump = 0;
     lastchange = 0;
-    lastepsilon2 = 0;
     seconds = 0; // before wdt irq is enabled
     magickey1 = MKEY1;
-    magickey2 = MKEY2;
-    if (eeprom_read_word(&eemagickey3[0]) != MKEY3) 
-      eeprom_write_word(&eemagickey3[0],MKEY3);
+    if (eeprom_read_word(&eemagickey2[0]) != MKEY2) 
+      eeprom_write_word(&eemagickey2[0],MKEY2);
     if (eeprom_read_byte(&eelowvolterr[0]) != 0xFF) 
       eeprom_write_byte(&eelowvolterr[0],0xFF);
+    refPress = 0.0;
   }
   pinMode(lcd_seg[7],OUTPUT);
   digitalWrite(lcd_seg[7],HIGH); // creates approx 3 mA load
-  delay(50);
+  idleDelay(50);
   volt = readVoltage();
   if (volt < LOWVOLT_ERR) 
-    if (readVoltage()  < LOWVOLT_ERR) 
-      if (eeprom_read_byte(&eelowvolterr[0]) != 0)
+    if (readVoltage()  < LOWVOLT_ERR && eeprom_read_byte(&eelowvolterr[0]) != 0)
 	eeprom_write_byte(&eelowvolterr[0],0);
   digitalWrite(lcd_seg[7],LOW); 
   DEBTTY_PRINT(F("Voltage: "));
@@ -756,7 +809,7 @@ void setup() {
   paramAlti();
 #ifdef DEB_LED
   digitalWrite(lcd_seg[7],HIGH); 
-  delay(500);
+  idleDelay(500);
   digitalWrite(lcd_seg[7],LOW); 
 #endif
 #ifdef DEB_LEDRAM
@@ -767,17 +820,30 @@ void setup() {
 #endif
 
 
+#ifdef DEB_LEDHEIGHT
+  int frac;
+  dispchar = '.';
+  refPress = measurePress(25);
+  dispchar = ' ';
+  displayNum((int)refPress);
+  displayChar('.');
+  frac = (int)(refPress*10)%10;
+  if (frac < 0) frac = -frac;
+  displayNum((int)(refPress*10)%10);
+#endif
+
 }
 
 void loop()
 {
-  float currPress = refPress;
+  float currPress;
   float height;
 
 #ifdef DEB_LED
     digitalWrite(lcd_seg[7],HIGH); 
-    delay(100);
+    idleDelay(100);
     digitalWrite(lcd_seg[7],LOW); 
+    
 #endif
 
   if (pressed) {
@@ -788,19 +854,34 @@ void loop()
     setSeconds(lastbump);
   }
   
-  if (state >= REQUEST_UP_STATE && state <= DESCEND_STATE) 
-    currPress = measurePress(5);
-  height = (refPress-currPress)/0.12;
-
   if ((eeprom_read_byte(&eelowvolterr[0]) == 0) && state > WAKEUP_STATE)
     state = BATT_LOW_STATE;
-  if (getSeconds() > MAXTIME) {
-    errcode = TOOLONG_ERROR;
-    errcnt = MAXERRCNT;
-  }
   if (errcnt >= MAXERRCNT) state = ERROR_STATE;
   if (state > LAST_STATE || state < NO_STATE) state = NO_STATE;
-    
+  if (sleeplevel == 5) state = DEEPSLEEP_STATE;
+
+  if (state == CLIMB_STATE ||
+      state == SUMMIT_STATE) {
+    if (getSeconds()%3 == 0) dispchar = '.';
+    currPress = measurePressWithRecovery(5);
+    dispchar = ' ';
+    idleDelay(100);
+    height = (refPress-currPress)/0.12;
+    if (height < -(EPSILON*2.0) || height > METER_UP+2*EPSILON) {
+#ifdef DEB_LEDHEIGHT
+      displayNum((int)height);
+      displayChar(' ');
+#endif
+      state = ERROR_STATE;
+      errcode = HEIGHT_ERROR;
+    }
+  }
+
+
+  //DEBUG
+  //  displayNum(state);
+  //  displayNum(sleeplevel);
+
   DEBLCD_CLEAR()
   DEBLCD_HOME()
   if (laststate != state) {
@@ -828,114 +909,104 @@ void loop()
 
   case SLEEP_STATE: // sleeping and waiting for a bump or reset to wake up
     if (!pressed) {
-      wdt_disable(); // no more seconds counting
-      IOoff(); // no more IO
-      set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-      sleep_mode(); // sleep & wait for bump or reset
+      gosleep();
     }
-    if (bumped || pressed) {
+    if (bumped || pressed)  {
       cli();
       seconds = 0;
       lastbump = 0;
       lastpress = 0;
       lastchange = 0;
-      lastepsilon2 = 0;
-      summitheight = METER_UP;
       sei();
-      state = WAKEUP_STATE;
       setupIO();
-      refPress = measurePress(30);
+      dispchar = '.';
+      idleDelay(100);
+      dispchar = ' ';
+      idleDelay(100);
+      state = WAKEUP_STATE;
     } 
     break;
 
   case WAKEUP_STATE: // somebody was moving us 
     if (bumped) {
-      digitalWrite(lcd_seg[7],HIGH); 
-      delay(200);
-      digitalWrite(lcd_seg[7],LOW); 
-      delay(20);
-      refPress = measurePress(30);
+      	dispchar = '.';
+	idleDelay(60);
+      	dispchar = ' ';
+	idleDelay(60);
     }
     if (pressed) {
       if (eeprom_read_byte(&eelowvolterr[0]) == 0) state = BATT_LOW_STATE;
       else {
-	state = REQUEST_UP_STATE;
+	dispchar = '.';
+	refPress = measurePressWithRecovery(20);
+	dispchar = ' ';
+	idleDelay(200);
+	state = CLIMB_STATE;
 	if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
+	displayNum(METER_UP);
+	if (sleeplevel == 0) sleeplevel = 1;
+	displayChar(' ');
+	if (sleeplevel == 1) sleeplevel = 0;
+	displayPString(meter_str);
+	displayChar(' ');
+	displayPString(up_str);
       }
     } else {
       if (getSeconds() > MAXWAKEUP_TOTAL) state = SLEEP_STATE;
-      else if (getSeconds() - lastbump > MAXWAKEUP_NOBUMP) state = SLEEP_STATE;
-      else if (getSeconds() - lastchange > WAKEUP_ASK) state = PRESS_ME_STATE;
+      else if  (getSeconds() - lastbump > MAXWAKEUP_NOBUMP) state = SLEEP_STATE;
     }
-    break;
-
-  case PRESS_ME_STATE: // if wakeup is too long
-    if (pressed) state = REQUEST_UP_STATE;
-    for (int i=0; i < 3; i++) {
-      displayPString(pressme_str);
-    }
-    state = SLEEP_STATE;
-    break;
-
-  case REQUEST_UP_STATE: // ask for getting up
-    if (!pressed && getSeconds() - lastchange < MAXREQUEST_DISPLAY_TIME) {
-      displayPString(up_str);
-      displayNum(METER_UP);
-      displayPString(meter_str);
-    } else state = CLIMB_STATE;
     break;
 
   case CLIMB_STATE: // steadily climbing
-    if (lastepsilon2 == 0 && height >= METER_UP-EPSILON2)
-      setSeconds(lastepsilon2);
-    if (height >= METER_UP-EPSILON) {
+#ifndef DEB_LEDSTABLE
+    if (METER_UP-height <= EPSILON) {
+      if (pressed) displayPString(summit_str);
       state = SUMMIT_STATE;
-      summitheight = height;
-    } else if (height >= METER_UP-EPSILON2 && 
-	       lastepsilon2 > 0 && 
-	       getSeconds() - lastepsilon2 > MAXEPSILON2) {
-      state = SUMMIT_STATE;
-      summitheight = height;
     } else if (pressed) {
-      if ((int)METER_UP-height > 0) {
-	displayPString(up_str);
+      if ((int)METER_UP-height >= 0) {
 	displayNum(METER_UP-height);
+	if (sleeplevel == 0) sleeplevel = 1;
+	displayChar(' ');
+	if (sleeplevel == 1) sleeplevel = 0;
 	displayPString(meter_str);
+	if (sleeplevel == 2) sleeplevel = 3;
+	displayChar(' ');
+	if (sleeplevel == 3) sleeplevel = 0;
+	if (sleeplevel == 4) sleeplevel = 5;
+	displayPString(up_str);
+	if (sleeplevel == 5) sleeplevel = 0;
       } else {
 	state = SUMMIT_STATE;
       }
-    } else if (height <= EPSILON2 && getSeconds() > MAXCLIMB ||
-	       (getSeconds() - lastbump > MINQUIET*2 &&
-		getSeconds() - lastpress > MINQUIET*2)) {
+    } else if (getSeconds() - lastbump > MINQUIET) {
       displayPString(bye_str);
       state = SLEEP_STATE;
     }
     break;
+#else
+    if (height < 0) {
+      displayChar('-');
+      height = -height;
+    }
+    displayNum(height);
+    displayChar('.');
+    displayNum((int)(height*10)%10);
+    displayChar(' ');
+    break;
+#endif
 
   case SUMMIT_STATE: // reached the summit
-    if ((pressed || (getSeconds() - lastchange < MAXDISPLAY_SUMMIT_TIME)) && 
-	(height >= summitheight - EPSILON2)) {
+    if (pressed) {
       displayPString(summit_str);
       if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
     }
-    if (height < summitheight-EPSILON2) 
-      state = DESCEND_STATE;
-    break;
-
-  case DESCEND_STATE: // steadily going down
-    if (height >= summitheight - EPSILON) state = SUMMIT_STATE;
-    else if (pressed) {
-      if (height - EPSILON <= 0) displayPString(bye_str);
-      else displayPString(down_str);
-    } else if (getSeconds() - lastbump > MINQUIET && 
-	     getSeconds() - lastpress > MINQUIET) {
-      if (height - EPSILON2 <= 0) state = SLEEP_STATE;
-    }
+    if (height < METER_UP-EPSILON*2) 
+      state = CLIMB_STATE;
     break;
 
   case BATT_LOW_STATE: // if battery is definitely too low
     if (!pressed || lastchange >= lastpress)
-      for (int i=0; i<3; i++) displayPString(emptybatt_str);
+      for (int i=0; i<3; i++) displayPString(lowbatt_str);
     state = SLEEP_STATE;
     displayPString(bye_str);
     break;
@@ -951,6 +1022,16 @@ void loop()
     errcnt = 0;
     state = SLEEP_STATE; 
     displayPString(bye_str);
+    break;
+
+  case DEEPSLEEP_STATE: // sleep for transport
+    displayPString(sleep_str);
+    disablePinChangeIRQ();
+    state = SLEEP_STATE;
+    sleeplevel = 0;
+    gosleep();
+    errcode = WAKEUP_ERROR;
+    errcnt = MAXERRCNT;
     break;
 
   default: // somehow, the state var got a wrong value
