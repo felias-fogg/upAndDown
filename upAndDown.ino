@@ -10,7 +10,7 @@
    Arduino board: ATtiny 84 / 1MHz
 */
 
-#define Version "2.3"
+#define Version "3.0"
 
 /* Version 0.9 - first version out in the wild
  * Version 1.0 - switched to SoftI2CMaster (faster and less memory consumption)
@@ -20,6 +20,7 @@
  *               after inactivity
  * Version 2.2 - removed bug introduced by using idleDelay - too inaccurate!
  * Version 2.3 - not yet tested: restricted pressure measuring & blinking
+ * Version 3.0 - not yet tested: all variable values in EEPROM
  */
 
 // #define ENGLISH // all messages in English
@@ -174,9 +175,6 @@ Adafruit_PCD8544 lcd = Adafruit_PCD8544(13,14,15,17,16);
 #define DEBLCD_CLEAR()
 #endif
 
-// I2C pins
-#define SDA_PIN POFF+2
-#define SCL_PIN POFF+1
 
 // 8-bit I2C address of MS5611 (CSB connected to Vcc)
 #define ADDRESS 0xEC
@@ -203,7 +201,7 @@ const uint8_t lcd_seg[] =
 // LCD Character Generator 
 // Change these defines as needed to make new characters.
 
-const uint16_t ascii_gen[] = {
+uint16_t ascii_gen[] EEMEM = {
   0, // " "
   0, // "!"
   SEGf+SEGb, // """
@@ -263,40 +261,7 @@ const uint16_t ascii_gen[] = {
   SEGb+SEGc+SEGe+SEGf+SEGg,   //  "X"
   SEGb+SEGc+SEGd+SEGf+SEGg,   //  "Y"
   SEGa+SEGb+SEGd+SEGe+SEGg,    //  "Z"
-  SEGa+SEGb,
-  SEGb+SEGg,
-  SEGg+SEGe,
-  SEGe+SEGd,
-  SEGd+SEGc,
-  SEGc+SEGg,
-  SEGg+SEGf,
-  SEGf+SEGa,
 };
-#define LASTCHAR 'Z'
-
-const char circle[] = { LASTCHAR+1, LASTCHAR+2, LASTCHAR+3, LASTCHAR+4, 
-			LASTCHAR+5, LASTCHAR+6, LASTCHAR+7, LASTCHAR+8 };
-
-/* messages */
-#ifdef ENGLISH
-const prog_char summit_str[] PROGMEM = "CODE 4213.";
-const prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
-const prog_char up_str[] PROGMEM ="UP";
-const prog_char meter_str[] PROGMEM ="M";
-const prog_char bye_str[] PROGMEM = "BYE.";
-const prog_char error_str[] PROGMEM = "  ERROR";
-const prog_char sleep_str[] PROGMEM = "SP";
-#else
-const prog_char summit_str[] PROGMEM = "CODE 4213.";
-const prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
-const prog_char up_str[] PROGMEM ="HOCH";
-const prog_char meter_str[] PROGMEM ="M";
-const prog_char bye_str[] PROGMEM = "BYE.";
-const prog_char error_str[] PROGMEM = "  FEHLER";
-const prog_char sleep_str[] PROGMEM = "SP";
-#endif
-
-
 
 /* states */
 
@@ -309,6 +274,20 @@ const prog_char sleep_str[] PROGMEM = "SP";
 #define ERROR_STATE 6
 #define DEEPSLEEP_STATE 7
 #define LAST_STATE 7
+
+/* initialization states */
+#define NO_INIT_STATE 0
+#define COLD_INIT_STATE 1
+#define CHECK_INIT_STATE 2
+#define SET_INIT_STATE 3
+#define HEIGHT_INIT_STATE 4
+#define SET_HEIGHT_INIT 5
+#define EPSILON_INIT_STATE 6
+#define SET_EPSILON_INIT 7
+#define COORD_INIT_STATE 8
+#define SET_COORD_INIT 9
+#define CODE_INIT_STATE 10
+#define SET_CODE_INIT 11
 
 
 #if defined(ATMEGA) && (defined(DEB_TTY) || defined(DEB_LCD))
@@ -339,12 +318,46 @@ uint16_t lastchange __attribute__ ((section (".noinit")));
 uint16_t lastmeasure __attribute__ ((section (".noinit"))); 
 // reference pressure for 0 level
 float refPress __attribute__ ((section (".noinit"))); 
+// tracking 3 resets in order to enable deep sleep
 uint8_t sleeplevel __attribute__ ((section (".noinit")));
+// last init input value
+int8_t lastinput __attribute__ ((section (".noinit")));
+// accumulated input
+uint16_t inputval __attribute__ ((section (".noinit")));
+// state during initialization
+uint8_t init_state __attribute__ ((section (".noinit")));
+
 
 uint16_t magickey1 __attribute__ ((section (".noinit"))); 
 
 uint16_t eemagickey2[1] EEMEM;
 uint8_t eelowvolterr[1] EEMEM;
+uint8_t eeepsilon[1] EEMEM = { EPSILON };
+uint16_t eesummitheight[1] EEMEM = { METER_UP };
+char eesummit_str[15] EEMEM = "CODE 4213.";
+
+/* messages */
+#ifdef ENGLISH
+char lowbatt_str[] EEMEM = "  BATT LO. ";
+char up_str[] EEMEM ="UP";
+char meter_str[] EEMEM ="M";
+char bye_str[] EEMEM = "BYE.";
+char error_str[] EEMEM = "  ERROR";
+char sleep_str[] EEMEM = "SLEEP";
+#else
+char lowbatt_str[] EEMEM = "  BATT LO. ";
+char up_str[] EEMEM ="HOCH";
+char meter_str[] EEMEM ="M";
+char bye_str[] EEMEM = "BYE.";
+char error_str[] EEMEM = "  FEHLER";
+char sleep_str[] EEMEM = "SLEEP";
+#endif
+char check_str[] EEMEM = "CHECK ";
+char set_str[] EEMEM = "SET ";
+char height_str[] EEMEM = "HEIGHT ";
+char epsilon_str[] EEMEM = "EPSILON ";
+char code_str[] EEMEM = "CODE ";
+char coord_str[] EEMEM = "COORDINATES ";
 
 /***** global vars ****/
 int errcnt = 0;
@@ -353,12 +366,16 @@ float volt;
 uint8_t pressed = true;
 volatile uint8_t bumped = false;
 uint8_t lbumped = false;
+uint8_t epsilon;
+uint16_t summitheight;
 
 /* interrupt routine to drive display */
 /* variables for display driver */
 int csegix = 0; // current segment index
 long cmask = 0;
 volatile unsigned char dispchar = ' ';
+unsigned char currchar = ' ';
+uint16_t currcode = 0;
 
 
 // correction coefficents of MS5611
@@ -370,11 +387,15 @@ uint16_t C[7];
 ISR(T1_vect)
 {
   TCNT1 = 0xFFFF-40; // 156 for 8MHz
+  if (currchar != dispchar) {
+    currchar = dispchar;
+    currcode = eeprom_read_word(&ascii_gen[0x7f&dispchar-' ']);
+  }
   digitalWrite(lcd_seg[csegix],LOW);
   if (++csegix == 8) {
     csegix = 0;
   }
-  if (1<<lcd_seg[csegix]&ascii_gen[(0x7F&dispchar)-' ']) {
+  if (1<<lcd_seg[csegix]&currcode) {
     digitalWrite(lcd_seg[csegix],HIGH);
   }
 }
@@ -426,10 +447,10 @@ void displayChar(char c)
   idleDelay(DISPLAY_OFF_MSECS);
 }
 
-void displayPString(const prog_char *mess)
+void displayEString(const char *mess)
 {
   char c;
-  while (c = pgm_read_byte(mess++)) {
+  while (c = (char)eeprom_read_byte((uint8_t*)mess++)) {
     displayChar(c);
   }
 }
@@ -763,7 +784,81 @@ void gosleep(void)
   sleep_mode(); // sleep & wait for reset
 }
 
-void setup() {
+void askNum(void)
+{
+  for (lastinput=0; lastinput < 10; lastinput++) displayNum(lastinput);
+  lastinput = -1;
+}
+
+// set all possible variables using a 1 bit interface (=reset)
+void askUser() 
+{ 
+  switch(init_state) {
+  case COLD_INIT_STATE:
+    init_state = CHECK_INIT_STATE;
+    displayEString(check_str);
+    init_state = SET_INIT_STATE;
+    displayEString(set_str);
+    init_state = NO_INIT_STATE;
+    break;
+
+  case CHECK_INIT_STATE:
+    init_state = COLD_INIT_STATE;
+    displayEString(height_str);
+    displayNum(summitheight);
+    displayEString(epsilon_str);
+    displayNum(epsilon);
+    displayEString(eesummit_str);
+    break;
+
+  case SET_INIT_STATE:
+    lastinput = -2; // means no input yet!
+    inputval = 0;
+    init_state = HEIGHT_INIT_STATE;
+    displayEString(height_str);
+    init_state = EPSILON_INIT_STATE;
+    displayEString(epsilon_str);
+    init_state = CODE_INIT_STATE;
+    displayEString(code_str);
+    init_state = NO_INIT_STATE;
+    break;
+
+  case HEIGHT_INIT_STATE:
+   if (lastinput == -1) {
+     eeprom_write_word(&eesummitheight[0],inputval);
+     summitheight = inputval;
+     init_state = COLD_INIT_STATE;
+   } else if (lastinput >= 0) 
+     inputval = inputval*10+lastinput;
+   if (inputval < 2000) askNum();
+   inputval = -1;
+   break;
+
+  case EPSILON_INIT_STATE:
+    if (lastinput == -2) askNum();
+    else if (lastinput >= 0) {
+      eeprom_write_byte(&eeepsilon[0],lastinput);
+      epsilon = lastinput;
+    }
+    init_state = COLD_INIT_STATE;
+    break;
+
+  case CODE_INIT_STATE:
+    if (lastinput == -2) inputval = 5;
+    else if (lastinput == -1) {
+      eeprom_write_byte((uint8_t*)(&eesummit_str[inputval]),0);
+      init_state = COLD_INIT_STATE;
+      return;
+    } else 
+      eeprom_write_byte((uint8_t*)(&eesummit_str[inputval++]),(lastinput+'0'));
+    askNum();
+    break;
+
+  }     
+}
+
+void setup() 
+{
 #if defined(ATMEGA) && defined(DEB_TTY)
   Serial.begin(19200); 
 #endif
@@ -796,6 +891,9 @@ void setup() {
     if (eeprom_read_byte(&eelowvolterr[0]) != 0xFF) 
       eeprom_write_byte(&eelowvolterr[0],0xFF);
     refPress = 0.0;
+    summitheight = eeprom_read_word(&eesummitheight[0]);
+    epsilon = eeprom_read_byte(&eeepsilon[0]);
+    init_state = COLD_INIT_STATE;
   }
   pinMode(lcd_seg[7],OUTPUT);
   digitalWrite(lcd_seg[7],HIGH); // creates approx 3 mA load
@@ -836,6 +934,7 @@ void setup() {
   displayNum((int)(refPress*10)%10);
 #endif
 
+  while (init_state != NO_INIT_STATE) askUser();
 }
 
 void loop()
@@ -875,7 +974,7 @@ void loop()
     dispchar = ' ';
     idleDelay(50);
     height = (refPress-currPress)/0.12;
-    if (height < -(EPSILON*2.0) || height > METER_UP+2*EPSILON) {
+    if (height < -(epsilon*2.0) || height > summitheight+2*epsilon) {
 #ifdef DEB_LEDHEIGHT
       displayNum((int)height);
       displayChar(' ');
@@ -927,10 +1026,10 @@ void loop()
       lastchange = 0;
       sei();
       setupIO();
-      dispchar = '.';
-      idleDelay(100);
-      dispchar = ' ';
-      idleDelay(100);
+      //dispchar = '.';
+      //idleDelay(100);
+      //dispchar = ' ';
+      //idleDelay(100);
       state = WAKEUP_STATE;
     } 
     break;
@@ -950,14 +1049,14 @@ void loop()
 	dispchar = ' ';
 	idleDelay(200);
 	state = CLIMB_STATE;
-	if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
-	displayNum(METER_UP);
+	if (volt < LOWVOLT_WARN) displayEString(lowbatt_str);
+	displayNum(summitheight);
 	if (sleeplevel == 0) sleeplevel = 1;
 	displayChar(' ');
 	if (sleeplevel == 1) sleeplevel = 0;
-	displayPString(meter_str);
+	displayEString(meter_str);
 	displayChar(' ');
-	displayPString(up_str);
+	displayEString(up_str);
       }
     } else {
       if (getSeconds() > MAXWAKEUP_TOTAL) state = SLEEP_STATE;
@@ -967,27 +1066,27 @@ void loop()
 
   case CLIMB_STATE: // steadily climbing
 #ifndef DEB_LEDSTABLE
-    if (METER_UP-height <= EPSILON) {
-      if (pressed) displayPString(summit_str);
+    if (summitheight-height <= epsilon) {
+      if (pressed) displayEString(eesummit_str);
       state = SUMMIT_STATE;
     } else if (pressed) {
-      if ((int)METER_UP-height >= 0) {
-	displayNum(METER_UP-height);
+      if ((int)summitheight-height >= 0) {
+	displayNum(summitheight-height);
 	if (sleeplevel == 0) sleeplevel = 1;
 	displayChar(' ');
 	if (sleeplevel == 1) sleeplevel = 0;
-	displayPString(meter_str);
+	displayEString(meter_str);
 	if (sleeplevel == 2) sleeplevel = 3;
 	displayChar(' ');
 	if (sleeplevel == 3) sleeplevel = 0;
 	if (sleeplevel == 4) sleeplevel = 5;
-	displayPString(up_str);
+	displayEString(up_str);
 	if (sleeplevel == 5) sleeplevel = 0;
       } else {
 	state = SUMMIT_STATE;
       }
     } else if (getSeconds() - lastbump > MINQUIET) {
-      displayPString(bye_str);
+      displayEString(bye_str);
       state = SLEEP_STATE;
     }
     break;
@@ -1005,46 +1104,41 @@ void loop()
 
   case SUMMIT_STATE: // reached the summit
     if (pressed) {
-      displayPString(summit_str);
-      if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
+      displayEString(eesummit_str);
+      if (volt < LOWVOLT_WARN) displayEString(lowbatt_str);
     }
-    if (height < METER_UP-EPSILON*2) 
+    if (height < summitheight-epsilon*2) 
       state = CLIMB_STATE;
     break;
 
   case BATT_LOW_STATE: // if battery is definitely too low
-    if (!pressed || lastchange >= lastpress)
-      for (int i=0; i<3; i++) displayPString(lowbatt_str);
+    for (int i=0; i<2; i++) displayEString(lowbatt_str);
     state = SLEEP_STATE;
-    displayPString(bye_str);
     break;
 
   case ERROR_STATE: // display error code
-    if (!pressed || lastchange >= lastpress) {
-      for (int i=0; i<4; i++) {
-	displayPString(error_str);
-	displayNum(errcode);
-      }
+    for (int i=0; i<3; i++) {
+      displayEString(error_str);
+      displayNum(errcode);
     }
     errcode = NO_ERROR;
     errcnt = 0;
     state = SLEEP_STATE; 
-    displayPString(bye_str);
     break;
 
   case DEEPSLEEP_STATE: // sleep for transport
-    displayPString(sleep_str);
+    displayEString(sleep_str);
     disablePinChangeIRQ();
     state = SLEEP_STATE;
     sleeplevel = 0;
     gosleep();
     errcode = WAKEUP_ERROR;
-    errcnt = MAXERRCNT;
+    state = ERROR_STATE;
     break;
 
   default: // somehow, the state var got a wrong value
     errcode = STATE_ERROR;
-    errcnt = MAXERRCNT;
+    state = ERROR_STATE;
     break;
 
   }
