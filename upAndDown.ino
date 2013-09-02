@@ -20,7 +20,7 @@
  *               after inactivity
  * Version 2.2 - removed bug introduced by using idleDelay - too inaccurate!
  * Version 2.3 - not yet tested: restricted pressure measuring & blinking
- * Version 3.0 - not yet tested: all variable values in EEPROM
+ * Version 3.0 - not yet tested: all variable values in EEPROM & init setting
  */
 
 // #define ENGLISH // all messages in English
