@@ -18,8 +18,7 @@
  * Version 2.1 - simplified, less states, output only when key pressed, 
  *               no scpecial descend mode, sleep only after 5 minutes 
  *               after inactivity
- * Version 2.2 - removed bug introduced by using idleDelay - too inaccurate!
- * Version 2.3 - not yet tested: restricted pressure measuring & blinking
+ * Version 2.2 - removed bug introduced by using idleDelay - to inaccurate!
  */
 
 // #define ENGLISH // all messages in English
@@ -335,8 +334,6 @@ uint16_t lastbump __attribute__ ((section (".noinit")));
 uint16_t lastpress __attribute__ ((section (".noinit"))); 
 // last time, the state was changed
 uint16_t lastchange __attribute__ ((section (".noinit"))); 
-// last time, we measured the pressure
-uint16_t lastmeasure __attribute__ ((section (".noinit"))); 
 // reference pressure for 0 level
 float refPress __attribute__ ((section (".noinit"))); 
 uint8_t sleeplevel __attribute__ ((section (".noinit")));
@@ -788,7 +785,6 @@ void setup() {
     lastpress = 0;
     lastbump = 0;
     lastchange = 0;
-    lastmeasure = 0;
     seconds = 0; // before wdt irq is enabled
     magickey1 = MKEY1;
     if (eeprom_read_word(&eemagickey2[0]) != MKEY2) 
@@ -842,7 +838,6 @@ void loop()
 {
   float currPress;
   float height;
-  uint16_t nextmeasure;
 
 #ifdef DEB_LED
     digitalWrite(lcd_seg[7],HIGH); 
@@ -865,15 +860,12 @@ void loop()
   if (state > LAST_STATE || state < NO_STATE) state = NO_STATE;
   if (sleeplevel == 5) state = DEEPSLEEP_STATE;
 
-  nextmeasure = getSeconds();
-  if ((state == CLIMB_STATE ||
-      state == SUMMIT_STATE) && 
-      (nextmeasure != lastmeasure)) {
-    lastmeasure = nextmeasure;
-    if (nextmeasure%3 == 0) dispchar = '.';
+  if (state == CLIMB_STATE ||
+      state == SUMMIT_STATE) {
+    if (getSeconds()%3 == 0) dispchar = '.';
     currPress = measurePressWithRecovery(5);
     dispchar = ' ';
-    idleDelay(50);
+    idleDelay(100);
     height = (refPress-currPress)/0.12;
     if (height < -(EPSILON*2.0) || height > METER_UP+2*EPSILON) {
 #ifdef DEB_LEDHEIGHT
