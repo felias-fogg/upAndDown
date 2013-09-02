@@ -1,6 +1,6 @@
 Platine				3,50
 Lithiumbatterie        	3,50
-Attiny86				2,85
+ATtiny84				2,85
 Vibrationsschalter		3,15
 Taster                		0,20
 7-Segementanzeige    	1,57
