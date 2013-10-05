@@ -10,7 +10,7 @@
    Arduino board: ATtiny 84 / 1MHz
 */
 
-#define Version "2.2"
+#define Version "2.6"
 
 /* Version 0.9 - first version out in the wild
  * Version 1.0 - switched to SoftI2CMaster (faster and less memory consumption)
@@ -19,8 +19,31 @@
  *               no scpecial descend mode, sleep only after 5 minutes 
  *               after inactivity
  * Version 2.2 - removed bug introduced by using idleDelay - too inaccurate!
- * Version 2.3 - not yet tested: restricted pressure measuring & blinking
+ * Version 2.3 - restricted pressure measuring & blinking - only every 3rd second
+ * Version 2.4 - added "Laufen" to the message
+ * Version 2.5 - parameter + message are now in EEPROM - and are initialized by defaults
+ * Version 2.6 - height is now a global var in order to avoid unintialized values 
+                 in the loop; we also now have a MAXCHANGE constant that leads to 
+		 a longer measurement if the height change over a 3 second period 
+		 is too large
+		 -> Version to go into the wild after 5.10.2013
  */
+#define  __PROG_TYPES_COMPAT__ 1
+#include <avr/wdt.h>
+#include <avr/sleep.h>
+#include <avr/eeprom.h>
+#include <avr/pgmspace.h>
+
+
+#define DEFAULT_METERS_UP 33 // meters. you have to walk up
+#define DEFAULT_EPSILON 5  // potential error
+#define DEFAULT_SUMMIT_STR "CODE 4213" // message displayed on summit, max 30 chars
+
+uint16_t eemagickey2[1] EEMEM;
+uint8_t eelowvolterr[1] EEMEM;
+uint8_t emeters_up[1] EEMEM;
+uint8_t eepsilon[1] EEMEM;
+char esummit_str[31] EEMEM;
 
 // #define ENGLISH // all messages in English
 
@@ -32,6 +55,7 @@
 // #define DEB_LEDHEIGHT
 // #define DEB_LEDSTABLE
 
+#define MAXCHANGE 4 // if the height change is > 4 meters, we do a second measurement!
 #define DISPLAY_ON_MSECS 1000 // msecs on
 #define DISPLAY_OFF_MSECS 300 // msecs off
 #define MAXERRCNT 10 // after that many measurement errors we give up
@@ -42,8 +66,6 @@
 #define VOLTHIGHCOEFF 0.17
 #define VOLTLOWCOEFF 0.05
 
-#define METER_UP 33.0
-#define EPSILON (METER_UP/5.0)
 #define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
 #define MAXWAKEUP_TOTAL 480 // 8 minutes for wakeup & start climbing
 #define MINQUIET 300 // 5 minutes no bump means we are back in the box
@@ -109,12 +131,6 @@
 				                       LCD   Vcc
 						       LCD   GND
 */
-#define  __PROG_TYPES_COMPAT__ 1
-#include <avr/wdt.h>
-#include <avr/sleep.h>
-#include <avr/eeprom.h>
-#include <avr/pgmspace.h>
-
 
 #if defined(ATMEGA) && defined(DEB_LCD)
 #include <Adafruit_GFX.h>
@@ -279,7 +295,6 @@ const char circle[] = { LASTCHAR+1, LASTCHAR+2, LASTCHAR+3, LASTCHAR+4,
 
 /* messages */
 #ifdef ENGLISH
-const prog_char summit_str[] PROGMEM = "CODE 4213.";
 const prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
 const prog_char up_str[] PROGMEM ="UP";
 const prog_char meter_str[] PROGMEM ="M";
@@ -287,15 +302,13 @@ const prog_char bye_str[] PROGMEM = "BYE.";
 const prog_char error_str[] PROGMEM = "  ERROR";
 const prog_char sleep_str[] PROGMEM = "SP";
 #else
-const prog_char summit_str[] PROGMEM = "CODE 4213.";
 const prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
-const prog_char up_str[] PROGMEM ="HOCH";
+const prog_char up_str[] PROGMEM ="HOCH LAUFEN";
 const prog_char meter_str[] PROGMEM ="M";
 const prog_char bye_str[] PROGMEM = "BYE.";
 const prog_char error_str[] PROGMEM = "  FEHLER";
 const prog_char sleep_str[] PROGMEM = "SP";
 #endif
-
 
 
 /* states */
@@ -339,20 +352,30 @@ uint16_t lastchange __attribute__ ((section (".noinit")));
 uint16_t lastmeasure __attribute__ ((section (".noinit"))); 
 // reference pressure for 0 level
 float refPress __attribute__ ((section (".noinit"))); 
+// measurement converted to height above zero level
+int height __attribute__ ((section (".noinit")));
+// last height when making measurement
+int lastheight __attribute__ ((section (".noinit")));
+
 uint8_t sleeplevel __attribute__ ((section (".noinit")));
 
 uint16_t magickey1 __attribute__ ((section (".noinit"))); 
 
-uint16_t eemagickey2[1] EEMEM;
-uint8_t eelowvolterr[1] EEMEM;
+
+
+
 
 /***** global vars ****/
+char summit_str[31] = DEFAULT_SUMMIT_STR; // will be initialized in setup!
 int errcnt = 0;
 int errcode = 0;
+int meters_up; // will be initialized from EEPROM
+int epsilon; // will be initialized from EEPROM
 float volt;
 uint8_t pressed = true;
 volatile uint8_t bumped = false;
 uint8_t lbumped = false;
+
 
 /* interrupt routine to drive display */
 /* variables for display driver */
@@ -430,6 +453,14 @@ void displayPString(const prog_char *mess)
 {
   char c;
   while (c = pgm_read_byte(mess++)) {
+    displayChar(c);
+  }
+}
+
+void displaySummitString(void) {
+  char c;
+  byte i = 0;
+  while (c = (char)eeprom_read_byte((uint8_t*)(&esummit_str[i++]))) {
     displayChar(c);
   }
 }
@@ -684,7 +715,7 @@ int freeRam(void)
 
 
 // This guards against reset loops caused by resets
-// is useless under Arduinos bootloader
+// is useless under Arduino's bootloader
 void wdt_init(void) __attribute__((naked)) __attribute__((section(".init3")));
 void wdt_init(void)
 {
@@ -783,6 +814,8 @@ void setup() {
     sleeplevel = 0;
     pressed = false; // startup reset
     bumped = false;
+    height = 0;
+    lastheight = 0;
     state = SLEEP_STATE;
     laststate = NO_STATE;
     lastpress = 0;
@@ -799,7 +832,7 @@ void setup() {
   }
   pinMode(lcd_seg[7],OUTPUT);
   digitalWrite(lcd_seg[7],HIGH); // creates approx 3 mA load
-  idleDelay(50);
+  idleDelay(30);
   volt = readVoltage();
   if (volt < LOWVOLT_ERR) 
     if (readVoltage()  < LOWVOLT_ERR && eeprom_read_byte(&eelowvolterr[0]) != 0)
@@ -811,6 +844,21 @@ void setup() {
   setupIO();
   resetAlti();
   paramAlti();
+
+  if (eeprom_read_byte(&emeters_up[0]) == 0xFF) {
+    dispchar = '.';
+    eeprom_write_byte(&emeters_up[0],(uint8_t)DEFAULT_METERS_UP);
+    eeprom_write_byte(&eepsilon[0],(uint8_t)DEFAULT_EPSILON);
+    byte i = 0;
+    do {
+      eeprom_write_byte((uint8_t*)&esummit_str[i],(uint8_t)summit_str[i]);
+      if (i == 30) break;
+    } while (summit_str[i++]);
+    eeprom_write_byte((uint8_t*)&esummit_str[30],'\0');
+    idleDelay(4000);
+    dispchar = ' ';
+  }
+
 #ifdef DEB_LED
   digitalWrite(lcd_seg[7],HIGH); 
   idleDelay(500);
@@ -836,12 +884,14 @@ void setup() {
   displayNum((int)(refPress*10)%10);
 #endif
 
+  // initialize parameters from EEPROM
+  meters_up =  (byte)eeprom_read_byte(&emeters_up[0]);
+  epsilon =  (byte)eeprom_read_byte(&eepsilon[0]);
 }
 
 void loop()
 {
   float currPress;
-  float height;
   uint16_t nextmeasure;
 
 #ifdef DEB_LED
@@ -868,20 +918,30 @@ void loop()
   nextmeasure = getSeconds();
   if ((state == CLIMB_STATE ||
       state == SUMMIT_STATE) && 
-      (nextmeasure != lastmeasure)) {
+      (nextmeasure != lastmeasure || pressed)) {
     lastmeasure = nextmeasure;
-    if (nextmeasure%3 == 0) dispchar = '.';
-    currPress = measurePressWithRecovery(5);
-    dispchar = ' ';
-    idleDelay(50);
-    height = (refPress-currPress)/0.12;
-    if (height < -(EPSILON*2.0) || height > METER_UP+2*EPSILON) {
+    if (nextmeasure%3 == 0 || pressed) { 
+      dispchar = '.';
+      currPress = measurePressWithRecovery(5);
+      dispchar = ' ';
+      idleDelay(300);
+      lastheight = height;
+      height = (int)((refPress-currPress)/0.12);
+      if (abs(height-lastheight) > MAXCHANGE) {
+	currPress = measurePressWithRecovery(10);
+	height = (int)((refPress-currPress)/0.12);
+      }
+#if 1
+      if ((height < -(3*epsilon) || height > meters_up+3*epsilon) &&
+	  state == CLIMB_STATE) {
 #ifdef DEB_LEDHEIGHT
-      displayNum((int)height);
-      displayChar(' ');
+	displayNum((int)height);
+	displayChar(' ');
 #endif
-      state = ERROR_STATE;
-      errcode = HEIGHT_ERROR;
+	state = ERROR_STATE;
+	errcode = HEIGHT_ERROR;
+      }
+#endif
     }
   }
 
@@ -947,14 +1007,15 @@ void loop()
       else {
 	dispchar = '.';
 	refPress = measurePressWithRecovery(20);
+	currPress = refPress;
 	dispchar = ' ';
 	idleDelay(200);
 	state = CLIMB_STATE;
 	if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
-	displayNum(METER_UP);
 	if (sleeplevel == 0) sleeplevel = 1;
-	displayChar(' ');
+	displayNum(meters_up);
 	if (sleeplevel == 1) sleeplevel = 0;
+	displayChar(' ');
 	displayPString(meter_str);
 	displayChar(' ');
 	displayPString(up_str);
@@ -967,17 +1028,17 @@ void loop()
 
   case CLIMB_STATE: // steadily climbing
 #ifndef DEB_LEDSTABLE
-    if (METER_UP-height <= EPSILON) {
-      if (pressed) displayPString(summit_str);
+    if (meters_up-height <= epsilon) {
+      if (pressed) displaySummitString();
       state = SUMMIT_STATE;
     } else if (pressed) {
-      if ((int)METER_UP-height >= 0) {
-	displayNum(METER_UP-height);
+      if (meters_up-height >= 0) {
 	if (sleeplevel == 0) sleeplevel = 1;
+	displayNum(meters_up-height);
 	displayChar(' ');
 	if (sleeplevel == 1) sleeplevel = 0;
-	displayPString(meter_str);
 	if (sleeplevel == 2) sleeplevel = 3;
+	displayPString(meter_str);
 	displayChar(' ');
 	if (sleeplevel == 3) sleeplevel = 0;
 	if (sleeplevel == 4) sleeplevel = 5;
@@ -997,18 +1058,15 @@ void loop()
       height = -height;
     }
     displayNum(height);
-    displayChar('.');
-    displayNum((int)(height*10)%10);
-    displayChar(' ');
     break;
 #endif
 
   case SUMMIT_STATE: // reached the summit
     if (pressed) {
-      displayPString(summit_str);
+      displaySummitString();
       if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
     }
-    if (height < METER_UP-EPSILON*2) 
+    if (height < meters_up-epsilon*2) 
       state = CLIMB_STATE;
     break;
 
