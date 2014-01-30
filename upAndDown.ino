@@ -1,3 +1,5 @@
+// -*-c++-*-
+
 /* A sketch that has the mission of sending people up for a couple of meters
    and then bringing them down again
    Uses the MS5611 altimeter/barometer
@@ -10,7 +12,8 @@
    Arduino board: ATtiny 84 / 1MHz
 */
 
-#define Version "2.6"
+#define Version "2.8"
+// #define OLD_I2C_WIRING // define if first board (= dragon) is used!
 
 /* Version 0.9 - first version out in the wild
  * Version 1.0 - switched to SoftI2CMaster (faster and less memory consumption)
@@ -23,29 +26,44 @@
  * Version 2.4 - added "Laufen" to the message
  * Version 2.5 - parameter + message are now in EEPROM - and are initialized by defaults
  * Version 2.6 - height is now a global var in order to avoid unintialized values 
-                 in the loop; we also now have a MAXCHANGE constant that leads to 
-		 a longer measurement if the height change over a 3 second period 
-		 is too large
-		 -> Version to go into the wild after 5.10.2013
+ *                in the loop; we also now have a MAXCHANGE constant that leads to 
+ *		 a longer measurement if the height change over a 3 second period 
+ *		 is too large
+ *		 -> Version to go into the wild after 5.10.2013
+ * Version 2.7 - switched SCL and SDA to conform with wiring description
+ *               EEPROM parameters are now at the beginning of the EEPROM
+ *               after power-up, the summit message is displayed
+ * Version 2.8 - changed internally from meters do decimeters for:
+ *               - meters_up -> decimeters_up
+ *               - epsilon
+ *               - height
+ *               - lastheight
+ *               The display is still in meters!
+ *               Added IMPERIAL as a compile time option which will
+ *               enable to display height in FEET instead of METERS
+ *               21.01.2014
+ *
  */
-#define  __PROG_TYPES_COMPAT__ 1
 #include <avr/wdt.h>
 #include <avr/sleep.h>
 #include <avr/eeprom.h>
 #include <avr/pgmspace.h>
 
 
-#define DEFAULT_METERS_UP 33 // meters. you have to walk up
+#define DEFAULT_METERS_UP 70 // meters. you have to walk up
 #define DEFAULT_EPSILON 5  // potential error
-#define DEFAULT_SUMMIT_STR "CODE 4213" // message displayed on summit, max 30 chars
+#define DEFAULT_SUMMIT_STR "CODE 132" // message displayed on summit, max 30 chars
 
-uint16_t eemagickey2[1] EEMEM;
-uint8_t eelowvolterr[1] EEMEM;
+#define MAXSUMSTR 200 // should be less than 512-6
+
 uint8_t emeters_up[1] EEMEM;
 uint8_t eepsilon[1] EEMEM;
-char esummit_str[31] EEMEM;
+char esummit_str[MAXSUMSTR+1] EEMEM;
+uint16_t eemagickey2[1] EEMEM;
+uint8_t eelowvolterr[1] EEMEM;
 
-// #define ENGLISH // all messages in English
+#define ENGLISH // all messages in English
+#define IMPERIAL // measures in feet
 
 // #define DEB_LCD
 // #define DEB_TTY
@@ -55,7 +73,13 @@ char esummit_str[31] EEMEM;
 // #define DEB_LEDHEIGHT
 // #define DEB_LEDSTABLE
 
-#define MAXCHANGE 4 // if the height change is > 4 meters, we do a second measurement!
+#ifdef IMPERIAL
+#define CONVFAC 3.048 // 3.048 decimeters are one foot
+#else
+#define CONVFAC 10.0  // 10 decimeters are one meter
+#endif
+
+#define MAXCHANGE 40 // if the height change is > 4 meters, we do a second measurement!
 #define DISPLAY_ON_MSECS 1000 // msecs on
 #define DISPLAY_OFF_MSECS 300 // msecs off
 #define MAXERRCNT 10 // after that many measurement errors we give up
@@ -100,6 +124,7 @@ char esummit_str[31] EEMEM;
    R9: 10 kOhm
    S1: Vibration switch
    The breakout board with the MS5611 on the prototype area
+   row 2 to 8, pin 1
  
    Now connect:
    Pin5 of the first row in the prototype area (PA1 = D1) with SDA MS5611
@@ -107,11 +132,16 @@ char esummit_str[31] EEMEM;
    Pin5 of the 8th row (Vcc) with Vcc MS5611
    Pin2 of the 8throw (GND) with GND MS5611
 
+   Note: On the MS5611 breakout board, you have to connect 
+   - the I2C bridge (of SPI/I2C), 
+   - the pullup resistor bridge, 
+   - and the bottom I2C ADDR bridge!
+
    On breadboard connect:
    Attiny-Pin   Arduino(Attiny)   Arduino(ProMini)     External
    PA0          D0                D2                   Vibration switch
-   PA1          D1                D3                   MS5611 SCL
-   PA2          D2                D4                   MS5611 SDA
+   PA1          D1                D3                   MS5611 SDA
+   PA2          D2                D4                   MS5611 SCL
                                                        MS5611 Vcc
 						       MS5611 GND
    PA3          D3                D5                   Disp. Pin1(g) 
@@ -145,18 +175,24 @@ Adafruit_PCD8544 lcd = Adafruit_PCD8544(13,14,15,17,16);
 #define T1_vect TIMER1_OVF_vect
 #define PCINT_vect PCINT2_vect
 #define SDA_PORT PORTD
-#define SDA_PIN 2
+#define SDA_PIN 3
 #define SCL_PORT PORTD
-#define SCL_PIN 1
+#define SCL_PIN 4
 #else
 #define VOLTOFFSET -0.08
 #define POFF 0
 #define T1_vect TIM1_OVF_vect
 #define PCINT_vect PCINT0_vect
+// I2C pins - now conforms to description above!
 #define SDA_PORT PORTA
-#define SDA_PIN 2
 #define SCL_PORT PORTA
+#ifdef OLD_I2C_WIRING // as on the dragon board!
+#define SDA_PIN 2
 #define SCL_PIN 1
+#else                // as described above and on the new boards
+#define SDA_PIN 1
+#define SCL_PIN 2
+#endif
 #endif
 
 #include <SoftI2CMaster.h>
@@ -190,10 +226,6 @@ Adafruit_PCD8544 lcd = Adafruit_PCD8544(13,14,15,17,16);
 #define DEBLCD_CLEAR()
 #endif
 
-// I2C pins
-#define SDA_PIN POFF+2
-#define SCL_PIN POFF+1
-
 // 8-bit I2C address of MS5611 (CSB connected to Vcc)
 #define ADDRESS 0xEC
 
@@ -223,7 +255,7 @@ const uint16_t ascii_gen[] = {
   0, // " "
   0, // "!"
   SEGf+SEGb, // """
-  0, // "#"
+  SEGa+SEGb+SEGg+SEGf, // "#" - display degree symbol 
   0, // "$"
   0, // "%"
   0, // "&"
@@ -295,19 +327,26 @@ const char circle[] = { LASTCHAR+1, LASTCHAR+2, LASTCHAR+3, LASTCHAR+4,
 
 /* messages */
 #ifdef ENGLISH
-const prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
-const prog_char up_str[] PROGMEM ="UP";
-const prog_char meter_str[] PROGMEM ="M";
-const prog_char bye_str[] PROGMEM = "BYE.";
-const prog_char error_str[] PROGMEM = "  ERROR";
-const prog_char sleep_str[] PROGMEM = "SP";
+const char lowbatt_str[] PROGMEM = "  BATT LO. ";
+const char go_str[] PROGMEM = "GO";
+#ifdef IMPERIAL
+const char up_str[] PROGMEM ="UP";
+const char meter_str[] PROGMEM ="FEET";
 #else
-const prog_char lowbatt_str[] PROGMEM = "  BATT LO. ";
-const prog_char up_str[] PROGMEM ="HOCH LAUFEN";
-const prog_char meter_str[] PROGMEM ="M";
-const prog_char bye_str[] PROGMEM = "BYE.";
-const prog_char error_str[] PROGMEM = "  FEHLER";
-const prog_char sleep_str[] PROGMEM = "SP";
+const char up_str[] PROGMEM ="UP";
+const char meter_str[] PROGMEM ="M";
+#endif
+const char bye_str[] PROGMEM = "BYE.";
+const char error_str[] PROGMEM = "  ERROR";
+const char sleep_str[] PROGMEM = "SP";
+#else
+const char lowbatt_str[] PROGMEM = "  BATT LO. ";
+const char go_str[] PROGMEM = "";
+const char up_str[] PROGMEM ="HOCH LAUFEN";
+const char meter_str[] PROGMEM ="M";
+const char bye_str[] PROGMEM = "BYE.";
+const char error_str[] PROGMEM = "  FEHLER";
+const char sleep_str[] PROGMEM = "SP";
 #endif
 
 
@@ -369,7 +408,7 @@ uint16_t magickey1 __attribute__ ((section (".noinit")));
 char summit_str[31] = DEFAULT_SUMMIT_STR; // will be initialized in setup!
 int errcnt = 0;
 int errcode = 0;
-int meters_up; // will be initialized from EEPROM
+int decimeters_up; // will be initialized from EEPROM
 int epsilon; // will be initialized from EEPROM
 float volt;
 uint8_t pressed = true;
@@ -449,7 +488,7 @@ void displayChar(char c)
   idleDelay(DISPLAY_OFF_MSECS);
 }
 
-void displayPString(const prog_char *mess)
+void displayPString(const char *mess)
 {
   char c;
   while (c = pgm_read_byte(mess++)) {
@@ -842,8 +881,10 @@ void setup() {
   DEBTTY_PRINTLN(volt);
 
   setupIO();
+
   resetAlti();
   paramAlti();
+
 
   if (eeprom_read_byte(&emeters_up[0]) == 0xFF) {
     dispchar = '.';
@@ -852,9 +893,9 @@ void setup() {
     byte i = 0;
     do {
       eeprom_write_byte((uint8_t*)&esummit_str[i],(uint8_t)summit_str[i]);
-      if (i == 30) break;
+      if (i == MAXSUMSTR) break;
     } while (summit_str[i++]);
-    eeprom_write_byte((uint8_t*)&esummit_str[30],'\0');
+    eeprom_write_byte((uint8_t*)&esummit_str[MAXSUMSTR],'\0');
     idleDelay(4000);
     dispchar = ' ';
   }
@@ -885,8 +926,11 @@ void setup() {
 #endif
 
   // initialize parameters from EEPROM
-  meters_up =  (byte)eeprom_read_byte(&emeters_up[0]);
-  epsilon =  (byte)eeprom_read_byte(&eepsilon[0]);
+  decimeters_up =  (byte)eeprom_read_byte(&emeters_up[0])*10;
+  epsilon =  (byte)eeprom_read_byte(&eepsilon[0])*10;
+
+  // display summit string if last_state == NO_STATE, i.e. fresh start
+  if (laststate == NO_STATE) displaySummitString();
 }
 
 void loop()
@@ -900,6 +944,7 @@ void loop()
     digitalWrite(lcd_seg[7],LOW); 
     
 #endif
+
 
   if (pressed) {
     setSeconds(lastpress);
@@ -926,13 +971,13 @@ void loop()
       dispchar = ' ';
       idleDelay(300);
       lastheight = height;
-      height = (int)((refPress-currPress)/0.12);
+      height = (int)((refPress-currPress)/0.012);
       if (abs(height-lastheight) > MAXCHANGE) {
 	currPress = measurePressWithRecovery(10);
-	height = (int)((refPress-currPress)/0.12);
+	height = (int)((refPress-currPress)/0.012);
       }
 #if 1
-      if ((height < -(3*epsilon) || height > meters_up+3*epsilon) &&
+      if ((height < -(3*epsilon) || height > decimeters_up+3*epsilon) &&
 	  state == CLIMB_STATE) {
 #ifdef DEB_LEDHEIGHT
 	displayNum((int)height);
@@ -1012,8 +1057,10 @@ void loop()
 	idleDelay(200);
 	state = CLIMB_STATE;
 	if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
+	displayPString(go_str);
+	displayChar(' ');	
 	if (sleeplevel == 0) sleeplevel = 1;
-	displayNum(meters_up);
+	displayNum(int(decimeters_up/CONVFAC));
 	if (sleeplevel == 1) sleeplevel = 0;
 	displayChar(' ');
 	displayPString(meter_str);
@@ -1028,13 +1075,15 @@ void loop()
 
   case CLIMB_STATE: // steadily climbing
 #ifndef DEB_LEDSTABLE
-    if (meters_up-height <= epsilon) {
+    if (decimeters_up-height <= epsilon) {
       if (pressed) displaySummitString();
       state = SUMMIT_STATE;
     } else if (pressed) {
-      if (meters_up-height >= 0) {
+      if (decimeters_up-height >= 0) {
+	displayPString(go_str);
+	displayChar(' ');	
 	if (sleeplevel == 0) sleeplevel = 1;
-	displayNum(meters_up-height);
+	displayNum(int((decimeters_up-height)/CONVFAC));
 	displayChar(' ');
 	if (sleeplevel == 1) sleeplevel = 0;
 	if (sleeplevel == 2) sleeplevel = 3;
@@ -1066,7 +1115,7 @@ void loop()
       displaySummitString();
       if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
     }
-    if (height < meters_up-epsilon*2) 
+    if (height < decimeters_up-epsilon*2) 
       state = CLIMB_STATE;
     break;
 
