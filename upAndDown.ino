@@ -12,8 +12,7 @@
    Arduino board: ATtiny 84 / 1MHz
 */
 
-#define Version "2.8"
-// #define OLD_I2C_WIRING // define if first board (= dragon) is used!
+#define Version "2.9"
 
 /* Version 0.9 - first version out in the wild
  * Version 1.0 - switched to SoftI2CMaster (faster and less memory consumption)
@@ -42,19 +41,58 @@
  *               Added IMPERIAL as a compile time option which will
  *               enable to display height in FEET instead of METERS
  *               21.01.2014
- *
+ * Version 2.9 - changed errcode to char
+ *               new error: OUTLIER_ERROR
+ *               changed retry limit in measure to 4
+ *               removed the MAXCHANGE clause (when 4 meter change, try again)
+ *               reject measurement if the max-min value is higher than 0.6 hPa = 5 meters
+ *               we check whether error code is set and then go into error state
+ *               introduced compile time SETTINGS 
+ *               and included timeout there!
  */
 #include <avr/wdt.h>
 #include <avr/sleep.h>
 #include <avr/eeprom.h>
 #include <avr/pgmspace.h>
 
+#define SCHOENBERG_SETTING 1
+#define HOME_SETTING 2
+#define DAGSTUHL_SETTING 3
 
-#define DEFAULT_METERS_UP 70 // meters. you have to walk up
+#define SETTING DAGSTUHL_SETTING
+
+#if SETTING==HOME_SETTING
+// #define OLD_I2C_WIRING // define if first board (= dragon) is used!
+#define MAXWAKEUP_NOBUMP 60 // if there is no bump, we go to sleep again 
+#define MAXWAKEUP_TOTAL 120 // 2 minutes for wakeup & start climbing
+#define MINQUIET 180 // 3 minutes no bump means we are back in the box
+#define DEFAULT_METERS_UP 6 // meters you have to walk up
+#define DEFAULT_EPSILON 2  // potential error
+#define DEFAULT_SUMMIT_STR "OBEN" // message displayed on summit, max 30 chars
+#endif
+#if SETTING==DAGSTUHL_SETTING
+#define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
+#define MAXWAKEUP_TOTAL 1800 // 30 minutes for wakeup & start climbing
+#define MINQUIET 540 // 10 minutes no bump means we are back in the box
+#define DEFAULT_METERS_UP 60 // meters you have to walk up
 #define DEFAULT_EPSILON 5  // potential error
 #define DEFAULT_SUMMIT_STR "CODE 132" // message displayed on summit, max 30 chars
+#define ENGLISH // all messages in English
+#define IMPERIAL // measures in feet
+#endif
+#if SETTING==SCHOENBERG_SETTING
+#define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
+#define MAXWAKEUP_TOTAL 1800 // 30 minutes for wakeup & start climbing
+#define MINQUIET 300 // 5 minutes no bump means we are back in the box
+#define DEFAULT_METERS_UP 32 // meters you have to walk up
+#define DEFAULT_EPSILON 5  // potential error
+#define DEFAULT_SUMMIT_STR "CODE 4213" // message displayed on summit, max 30 chars
+#define OLD_I2C_WIRING // define if first board (= dragon) is used!
+#endif
+
 
 #define MAXSUMSTR 200 // should be less than 512-6
+#define MAXOUTLIER 0.6 // max diff between extreme measurements corresponds to 5 meters
 
 uint8_t emeters_up[1] EEMEM;
 uint8_t eepsilon[1] EEMEM;
@@ -62,8 +100,6 @@ char esummit_str[MAXSUMSTR+1] EEMEM;
 uint16_t eemagickey2[1] EEMEM;
 uint8_t eelowvolterr[1] EEMEM;
 
-#define ENGLISH // all messages in English
-#define IMPERIAL // measures in feet
 
 // #define DEB_LCD
 // #define DEB_TTY
@@ -79,7 +115,6 @@ uint8_t eelowvolterr[1] EEMEM;
 #define CONVFAC 10.0  // 10 decimeters are one meter
 #endif
 
-#define MAXCHANGE 40 // if the height change is > 4 meters, we do a second measurement!
 #define DISPLAY_ON_MSECS 1000 // msecs on
 #define DISPLAY_OFF_MSECS 300 // msecs off
 #define MAXERRCNT 10 // after that many measurement errors we give up
@@ -90,21 +125,20 @@ uint8_t eelowvolterr[1] EEMEM;
 #define VOLTHIGHCOEFF 0.17
 #define VOLTLOWCOEFF 0.05
 
-#define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
-#define MAXWAKEUP_TOTAL 480 // 8 minutes for wakeup & start climbing
-#define MINQUIET 300 // 5 minutes no bump means we are back in the box
+
 
 /* error codes */
 #define NO_ERROR 0
-#define RESET_ERROR 1
-#define PARAM_ERROR 2
-#define CONV_ERROR 3
-#define TEMP_ERROR 4
-#define PRESS_ERROR 5
-#define NOBUMP_ERROR 6
-#define HEIGHT_ERROR 7
-#define WAKEUP_ERROR 8
-#define STATE_ERROR 9
+#define RESET_ERROR '1'
+#define PARAM_ERROR '2'
+#define CONV_ERROR '3'
+#define TEMP_ERROR '4'
+#define PRESS_ERROR '5'
+#define NOBUMP_ERROR '6'
+#define HEIGHT_ERROR '7'
+#define WAKEUP_ERROR '8'
+#define STATE_ERROR '9'
+#define OUTLIER_ERROR 'A'
 
 
 #if (__AVR_ARCH__  == 5) // means ATMEGA 
@@ -311,19 +345,8 @@ const uint16_t ascii_gen[] = {
   SEGb+SEGc+SEGe+SEGf+SEGg,   //  "X"
   SEGb+SEGc+SEGd+SEGf+SEGg,   //  "Y"
   SEGa+SEGb+SEGd+SEGe+SEGg,    //  "Z"
-  SEGa+SEGb,
-  SEGb+SEGg,
-  SEGg+SEGe,
-  SEGe+SEGd,
-  SEGd+SEGc,
-  SEGc+SEGg,
-  SEGg+SEGf,
-  SEGf+SEGa,
 };
 #define LASTCHAR 'Z'
-
-const char circle[] = { LASTCHAR+1, LASTCHAR+2, LASTCHAR+3, LASTCHAR+4, 
-			LASTCHAR+5, LASTCHAR+6, LASTCHAR+7, LASTCHAR+8 };
 
 /* messages */
 #ifdef ENGLISH
@@ -407,7 +430,7 @@ uint16_t magickey1 __attribute__ ((section (".noinit")));
 /***** global vars ****/
 char summit_str[31] = DEFAULT_SUMMIT_STR; // will be initialized in setup!
 int errcnt = 0;
-int errcode = 0;
+char errcode = '\0';
 int decimeters_up; // will be initialized from EEPROM
 int epsilon; // will be initialized from EEPROM
 float volt;
@@ -606,6 +629,8 @@ float measurePress(int count)
   float OFF; 
   float SENS; 
   float acc = 0;
+  float minpress = 5000.0;
+  float maxpress = 0;
 
   if (count <= 0) count = 1;
   for (int i = 0; i < count && errcnt < MAXERRCNT; i++) {
@@ -657,11 +682,13 @@ float measurePress(int count)
       DEBTTY_PRINT(F("P="))
       DEBTTY_PRINTLN(P)
       */
-      if (P < 600.0 || P > 1200.0) { // almost impossible pressures up to 2000 meters elevation
+      if (P < 600.0 || P > 1200.0) { // almost impossible pressures up to 4000 meters elevation
 	errcnt++;
 	errcode = PRESS_ERROR;
       }
       acc  += P;
+      if (minpress > P) minpress = P;
+      if (maxpress < P) maxpress = P;
     } else {
       errcnt++;
       errcode = CONV_ERROR;
@@ -675,6 +702,10 @@ float measurePress(int count)
       }
     }
   }
+  if (maxpress-minpress > MAXOUTLIER) { // if more than 0.6 hPa resp. 5 meters diff
+    errcnt = MAXERRCNT;
+    errcode = OUTLIER_ERROR;
+  }
   return (acc/count);
 }
 
@@ -682,7 +713,7 @@ float measurePressWithRecovery(int count)
 {
   float result;
   bool cont = true;
-  int retrycnt = 3;
+  int retrycnt = 4;
 
   while (retrycnt-- && cont) {
     result = measurePress(count);
@@ -972,24 +1003,20 @@ void loop()
       idleDelay(300);
       lastheight = height;
       height = (int)((refPress-currPress)/0.012);
-      if (abs(height-lastheight) > MAXCHANGE) {
-	currPress = measurePressWithRecovery(10);
-	height = (int)((refPress-currPress)/0.012);
-      }
 #if 1
-      if ((height < -(3*epsilon) || height > decimeters_up+3*epsilon) &&
+      if ((height < -(5*epsilon) || height > decimeters_up+5*epsilon) &&
 	  state == CLIMB_STATE) {
 #ifdef DEB_LEDHEIGHT
 	displayNum((int)height);
 	displayChar(' ');
 #endif
-	state = ERROR_STATE;
+        errcnt = MAXERRCNT;
 	errcode = HEIGHT_ERROR;
       }
 #endif
     }
   }
-
+  if (errcode && errcnt >= MAXERRCNT) state = ERROR_STATE;
 
   //DEBUG
   //  displayNum(state);
@@ -1057,15 +1084,17 @@ void loop()
 	idleDelay(200);
 	state = CLIMB_STATE;
 	if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
-	displayPString(go_str);
-	displayChar(' ');	
-	if (sleeplevel == 0) sleeplevel = 1;
-	displayNum(int(decimeters_up/CONVFAC));
+	if (!errcode || errcnt < MAXERRCNT) {
+	  displayPString(go_str);
+	  displayChar(' ');	
+	  if (sleeplevel == 0) sleeplevel = 1;
+	  displayNum(int(decimeters_up/CONVFAC));
 	if (sleeplevel == 1) sleeplevel = 0;
 	displayChar(' ');
 	displayPString(meter_str);
 	displayChar(' ');
 	displayPString(up_str);
+	}
       }
     } else {
       if (getSeconds() > MAXWAKEUP_TOTAL) state = SLEEP_STATE;
@@ -1130,7 +1159,8 @@ void loop()
     if (!pressed || lastchange >= lastpress) {
       for (int i=0; i<4; i++) {
 	displayPString(error_str);
-	displayNum(errcode);
+	displayChar(' ');
+	displayChar(errcode);
       }
     }
     errcode = NO_ERROR;
