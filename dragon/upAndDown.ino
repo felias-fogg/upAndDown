@@ -60,8 +60,6 @@
 #define DAGSTUHL_SETTING 3
 
 #define SETTING DAGSTUHL_SETTING
-// 8-bit I2C address of MS5611 (CSB not connected to Vcc)
-#define ADDRESS 0xEE
 
 #if SETTING==HOME_SETTING
 // #define OLD_I2C_WIRING // define if first board (= dragon) is used!
@@ -171,7 +169,7 @@ uint8_t eelowvolterr[1] EEMEM;
    Note: On the MS5611 breakout board, you have to connect 
    - the I2C bridge (of SPI/I2C), 
    - the pullup resistor bridge, 
-   - and the bottom I2C ADDR bridge - NO! We now use EE instead of EC!
+   - and the bottom I2C ADDR bridge!
 
    On breadboard connect:
    Attiny-Pin   Arduino(Attiny)   Arduino(ProMini)     External
@@ -199,9 +197,9 @@ uint8_t eelowvolterr[1] EEMEM;
 */
 
 #if defined(ATMEGA) && defined(DEB_LCD)
-//#include <Adafruit_GFX.h>
-//#include <Adafruit_PCD8544.h>
-//Adafruit_PCD8544 lcd = Adafruit_PCD8544(13,14,15,17,16); 
+#include <Adafruit_GFX.h>
+#include <Adafruit_PCD8544.h>
+Adafruit_PCD8544 lcd = Adafruit_PCD8544(13,14,15,17,16); 
 #endif
 
 // differences between Atmega and Attiny
@@ -261,6 +259,9 @@ uint8_t eelowvolterr[1] EEMEM;
 #define DEBLCD_DISPLAY()
 #define DEBLCD_CLEAR()
 #endif
+
+// 8-bit I2C address of MS5611 (CSB connected to Vcc)
+#define ADDRESS 0xEC
 
 // error value for measurements
 #define ERRORVAL -9999.0
@@ -785,7 +786,7 @@ int freeRam(void)
 
 // This guards against reset loops caused by resets
 // is useless under Arduino's bootloader
-void wdt_init(void) __attribute__((naked)) __attribute__((section(".init3"))) __attribute__((used));
+void wdt_init(void) __attribute__((naked)) __attribute__((section(".init3")));
 void wdt_init(void)
 {
   MCUSR = 0;
