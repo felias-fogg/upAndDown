@@ -49,6 +49,7 @@
  *               we check whether error code is set and then go into error state
  *               introduced compile time SETTINGS 
  *               and included timeout there!
+ * Version 3.0 - added  __attribute__((used)) to wdt_init
  */
 #include <avr/wdt.h>
 #include <avr/sleep.h>
