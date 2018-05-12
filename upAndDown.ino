@@ -12,7 +12,6 @@
    Arduino board: ATtiny 84 / 1MHz
 */
 
-#define Version "2.9"
 
 /* Version 0.9 - first version out in the wild
  * Version 1.0 - switched to SoftI2CMaster (faster and less memory consumption)
@@ -50,7 +49,11 @@
  *               introduced compile time SETTINGS 
  *               and included timeout there!
  * Version 3.0 - added  __attribute__((used)) to wdt_init
+ * Version 3.1 - added I2C_ERROR when i2c initialization failed
+ *             - added RESET: Press key five times when GO is displayed
  */
+#define Version "3.1"
+
 #include <avr/wdt.h>
 #include <avr/sleep.h>
 #include <avr/eeprom.h>
@@ -72,16 +75,18 @@
 #define DEFAULT_METERS_UP 6 // meters you have to walk up
 #define DEFAULT_EPSILON 2  // potential error
 #define DEFAULT_SUMMIT_STR "OBEN" // message displayed on summit, max 30 chars
+#define INTREFVOLTAGE 1120
 #endif
 #if SETTING==DAGSTUHL_SETTING
 #define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
-#define MAXWAKEUP_TOTAL 1800 // 30 minutes for wakeup & start climbing
+#define MAXWAKEUP_TOTAL 3600 // 60 minutes for wakeup & start climbing
 #define MINQUIET 540 // 10 minutes no bump means we are back in the box
 #define DEFAULT_METERS_UP 60 // meters you have to walk up
 #define DEFAULT_EPSILON 5  // potential error
 #define DEFAULT_SUMMIT_STR "CODE 132" // message displayed on summit, max 30 chars
 #define ENGLISH // all messages in English
 #define IMPERIAL // measures in feet
+#define INTREFVOLTAGE 1112
 #endif
 #if SETTING==SCHOENBERG_SETTING
 #define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
@@ -91,6 +96,7 @@
 #define DEFAULT_EPSILON 5  // potential error
 #define DEFAULT_SUMMIT_STR "CODE 4213" // message displayed on summit, max 30 chars
 #define OLD_I2C_WIRING // define if first board (= dragon) is used!
+#define INTREFVOLTAGE 1120
 #endif
 
 
@@ -122,11 +128,8 @@ uint8_t eelowvolterr[1] EEMEM;
 #define DISPLAY_OFF_MSECS 300 // msecs off
 #define MAXERRCNT 10 // after that many measurement errors we give up
 #define MAXRETRYCNT 5 // number of retries in reset and param command
-#define LOWVOLT_WARN 2.8 // warning that battery is low
-#define LOWVOLT_ERR 2.3 // with that we do not startup anymore!
-#define VOLTSPLIT 4.5
-#define VOLTHIGHCOEFF 0.17
-#define VOLTLOWCOEFF 0.05
+#define LOWVOLT_WARN 280 // warning that battery is low
+#define LOWVOLT_ERR 230 // with that we do not startup anymore!
 
 
 
@@ -142,6 +145,7 @@ uint8_t eelowvolterr[1] EEMEM;
 #define WAKEUP_ERROR '8'
 #define STATE_ERROR '9'
 #define OUTLIER_ERROR 'A'
+#define I2C_ERROR 'B'
 
 
 #if (__AVR_ARCH__  == 5) // means ATMEGA 
@@ -207,7 +211,6 @@ uint8_t eelowvolterr[1] EEMEM;
 
 // differences between Atmega and Attiny
 #ifdef ATMEGA
-#define VOLTOFFSET -0.06
 #define POFF 2
 #define T1_vect TIMER1_OVF_vect
 #define PCINT_vect PCINT2_vect
@@ -216,7 +219,6 @@ uint8_t eelowvolterr[1] EEMEM;
 #define SCL_PORT PORTD
 #define SCL_PIN 4
 #else
-#define VOLTOFFSET -0.08
 #define POFF 0
 #define T1_vect TIM1_OVF_vect
 #define PCINT_vect PCINT0_vect
@@ -349,6 +351,7 @@ const uint16_t ascii_gen[] = {
 #define LASTCHAR 'Z'
 
 /* messages */
+const char reset_str[] PROGMEM = "RESET";
 #ifdef ENGLISH
 const char lowbatt_str[] PROGMEM = "  BATT LO. ";
 const char go_str[] PROGMEM = "GO";
@@ -383,7 +386,8 @@ const char sleep_str[] PROGMEM = "SP";
 #define BATT_LOW_STATE 5
 #define ERROR_STATE 6
 #define DEEPSLEEP_STATE 7
-#define LAST_STATE 7
+#define RESET_STATE 8
+#define LAST_STATE 8
 
 
 #if defined(ATMEGA) && (defined(DEB_TTY) || defined(DEB_LCD))
@@ -399,9 +403,9 @@ char statestr[14][12] = { "UNDEF", "SLEEP", "WAKEUP",
 
 /***** super global variables (surviving resets) *****/
 // The state var
-uint8_t state __attribute__ ((section (".noinit")));
+volatile uint8_t state __attribute__ ((section (".noinit")));
 // value of start variable last time
-uint8_t laststate __attribute__ ((section (".noinit")));
+volatile uint8_t laststate __attribute__ ((section (".noinit")));
 // This counter is advanced by the wdt interrupt - started after wakeup
 volatile uint16_t seconds __attribute__ ((section (".noinit"))); 
 // Keeping track when last bump happened (using secods)
@@ -411,16 +415,16 @@ uint16_t lastpress __attribute__ ((section (".noinit")));
 // last time, the state was changed
 uint16_t lastchange __attribute__ ((section (".noinit"))); 
 // last time, we measured the pressure
-uint16_t lastmeasure __attribute__ ((section (".noinit"))); 
+volatile uint16_t lastmeasure __attribute__ ((section (".noinit"))); 
 // reference pressure for 0 level
-float refPress __attribute__ ((section (".noinit"))); 
+volatile float refPress __attribute__ ((section (".noinit"))); 
 // measurement converted to height above zero level
-int height __attribute__ ((section (".noinit")));
+volatile int height __attribute__ ((section (".noinit")));
 // last height when making measurement
-int lastheight __attribute__ ((section (".noinit")));
+volatile int lastheight __attribute__ ((section (".noinit")));
 
-uint8_t sleeplevel __attribute__ ((section (".noinit")));
-
+volatile uint8_t sleeplevel __attribute__ ((section (".noinit")));
+volatile uint8_t resetlevel __attribute__ ((section (".noinit")));
 uint16_t magickey1 __attribute__ ((section (".noinit"))); 
 
 
@@ -433,7 +437,7 @@ int errcnt = 0;
 char errcode = '\0';
 int decimeters_up; // will be initialized from EEPROM
 int epsilon; // will be initialized from EEPROM
-float volt;
+int volt;
 uint8_t pressed = true;
 volatile uint8_t bumped = false;
 uint8_t lbumped = false;
@@ -730,11 +734,10 @@ float measurePressWithRecovery(int count)
 }
 
 
-float readVoltage(void)
+int readVoltage(void)
 {
-  int reading;
-  float result;
-
+  int result, reading;
+  
   ADCSRA |= (1<<ADEN); // switch on ADC  
   idleDelay(20);
 
@@ -747,13 +750,10 @@ float readVoltage(void)
   idleDelay(20); // Wait for Vref to settle
   ADCSRA |= _BV(ADSC); // Convert
   while (bit_is_set(ADCSRA,ADSC));
-  reading = ADCL;
-  reading |= ADCH<<8;
-  result = 1126.4 / reading; // Back-calculate AVcc in mV
-  // correction:
-  if (result > VOLTSPLIT) result = result - (result - VOLTSPLIT)*VOLTHIGHCOEFF;
-  else result = result + (VOLTSPLIT - result)*VOLTLOWCOEFF;
-  result += VOLTOFFSET;
+  ADCSRA |= _BV(ADSC); // Convert again
+  while (bit_is_set(ADCSRA,ADSC));
+  reading = ADC;
+  result = (((INTREFVOLTAGE * 1023L) / ADC) + 5L) / 10L;
 
   DEBTTY_PRINT(F("Raw voltage: "))
   DEBTTY_PRINTLN(reading)
@@ -871,7 +871,10 @@ void setup() {
 #if defined(ATMEGA) && defined(DEB_LCD)
   lcd.begin();
 #endif
-  i2c_init();
+  if (!i2c_init()) {
+    errcnt = MAXERRCNT;
+    errcode = I2C_ERROR;
+  }
   if (magickey1 == MKEY1 && 
       eeprom_read_word(&eemagickey2[0]) == MKEY2) {
     DEBTTY_PRINTLN(F("Reset pressed"));
@@ -882,6 +885,7 @@ void setup() {
     DEBTTY_PRINT(F("Free ram:"));
     DEBTTY_PRINTLN(freeRam());
     sleeplevel = 0;
+    resetlevel = 0;
     pressed = false; // startup reset
     bumped = false;
     height = 0;
@@ -912,10 +916,10 @@ void setup() {
   DEBTTY_PRINTLN(volt);
 
   setupIO();
-
-  resetAlti();
-  paramAlti();
-
+  if (errcode != I2C_ERROR) {
+    resetAlti();
+    paramAlti();
+  }
 
   if (eeprom_read_byte(&emeters_up[0]) == 0xFF) {
     dispchar = '.';
@@ -940,7 +944,7 @@ void setup() {
   if (!pressed) displayNum(freeRam());
 #endif
 #ifdef DEB_LEDBATT
-  displayNum((int)(volt*100));
+  displayNum(volt);
 #endif
 
 
@@ -990,6 +994,7 @@ void loop()
   if (errcnt >= MAXERRCNT) state = ERROR_STATE;
   if (state > LAST_STATE || state < NO_STATE) state = NO_STATE;
   if (sleeplevel == 5) state = DEEPSLEEP_STATE;
+  if (resetlevel >= 5) state = RESET_STATE;
 
   nextmeasure = getSeconds();
   if ((state == CLIMB_STATE ||
@@ -1047,6 +1052,13 @@ void loop()
 
   switch(state) {
 
+  case RESET_STATE:
+    resetlevel = 0;
+    displayPString(reset_str);
+    state = WAKEUP_STATE;
+    pressed = true;
+    break;
+    
   case SLEEP_STATE: // sleeping and waiting for a bump or reset to wake up
     if (!pressed) {
       gosleep();
@@ -1085,8 +1097,10 @@ void loop()
 	state = CLIMB_STATE;
 	if (volt < LOWVOLT_WARN) displayPString(lowbatt_str);
 	if (!errcode || errcnt < MAXERRCNT) {
+	  resetlevel++;
 	  displayPString(go_str);
-	  displayChar(' ');	
+	  displayChar(' ');
+	  resetlevel = 0;
 	  if (sleeplevel == 0) sleeplevel = 1;
 	  displayNum(int(decimeters_up/CONVFAC));
 	if (sleeplevel == 1) sleeplevel = 0;
@@ -1109,8 +1123,10 @@ void loop()
       state = SUMMIT_STATE;
     } else if (pressed) {
       if (decimeters_up-height >= 0) {
+	resetlevel++;
 	displayPString(go_str);
-	displayChar(' ');	
+	displayChar(' ');
+	resetlevel = 0;
 	if (sleeplevel == 0) sleeplevel = 1;
 	displayNum(int((decimeters_up-height)/CONVFAC));
 	displayChar(' ');
