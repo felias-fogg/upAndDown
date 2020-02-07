@@ -51,8 +51,14 @@
  * Version 3.0 - added  __attribute__((used)) to wdt_init
  * Version 3.1 - added I2C_ERROR when i2c initialization failed
  *             - added RESET: Press key five times when GO is displayed
+ * Version 3.2 (19.4.2019)
+ *             - increased SCHOENBERG epsilon by 2
+ *             - allow recovery when OUTLIER error
+ *             - ignoring bad measurements (but increasing errcnt!)
+ *             - RESET can be activated when key is pressed five times during GO or number.
+ *             - added ADDRESS constant to SETTING-specific settings
  */
-#define Version "3.1"
+#define Version "3.2"
 
 #include <avr/wdt.h>
 #include <avr/sleep.h>
@@ -63,12 +69,9 @@
 #define HOME_SETTING 2
 #define DAGSTUHL_SETTING 3
 
-#define SETTING DAGSTUHL_SETTING
-// 8-bit I2C address of MS5611 (CSB not connected to Vcc)
-#define ADDRESS 0xEE
+#define SETTING SCHOENBERG_SETTING
 
 #if SETTING==HOME_SETTING
-// #define OLD_I2C_WIRING // define if first board (= dragon) is used!
 #define MAXWAKEUP_NOBUMP 60 // if there is no bump, we go to sleep again 
 #define MAXWAKEUP_TOTAL 120 // 2 minutes for wakeup & start climbing
 #define MINQUIET 180 // 3 minutes no bump means we are back in the box
@@ -76,6 +79,8 @@
 #define DEFAULT_EPSILON 2  // potential error
 #define DEFAULT_SUMMIT_STR "OBEN" // message displayed on summit, max 30 chars
 #define INTREFVOLTAGE 1120
+#define OLD_I2C_WIRING // define if first board (= dragon) is used, depends of course!
+#define ADDRESS 0xEC // depends, of course!
 #endif
 #if SETTING==DAGSTUHL_SETTING
 #define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
@@ -87,16 +92,18 @@
 #define ENGLISH // all messages in English
 #define IMPERIAL // measures in feet
 #define INTREFVOLTAGE 1112
+#define ADDRESS 0xEE // 8-bit I2C address of MS5611 (CSB not connected to Vcc)
 #endif
 #if SETTING==SCHOENBERG_SETTING
 #define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
 #define MAXWAKEUP_TOTAL 1800 // 30 minutes for wakeup & start climbing
 #define MINQUIET 300 // 5 minutes no bump means we are back in the box
 #define DEFAULT_METERS_UP 32 // meters you have to walk up
-#define DEFAULT_EPSILON 5  // potential error
+#define DEFAULT_EPSILON 7  // potential error
 #define DEFAULT_SUMMIT_STR "CODE 4213" // message displayed on summit, max 30 chars
 #define OLD_I2C_WIRING // define if first board (= dragon) is used!
 #define INTREFVOLTAGE 1120
+#define ADDRESS 0xEC // 8-bit I2C address of MS5611 (CSB connected to Vcc)
 #endif
 
 
@@ -145,7 +152,7 @@ uint8_t eelowvolterr[1] EEMEM;
 #define WAKEUP_ERROR '8'
 #define STATE_ERROR '9'
 #define OUTLIER_ERROR 'A'
-#define I2C_ERROR 'B'
+#define I2C_ERROR 'C'
 
 
 #if (__AVR_ARCH__  == 5) // means ATMEGA 
@@ -179,28 +186,29 @@ uint8_t eelowvolterr[1] EEMEM;
    - and the bottom I2C ADDR bridge - NO! We now use EE instead of EC!
 
    On breadboard connect:
-   Attiny-Pin   Arduino(Attiny)   Arduino(ProMini)     External
-   PA0          D0                D2                   Vibration switch
-   PA1          D1                D3                   MS5611 SDA
-   PA2          D2                D4                   MS5611 SCL
-                                                       MS5611 Vcc
-						       MS5611 GND
-   PA3          D3                D5                   Disp. Pin1(g) 
-   PA4          D4                D6                   Disp. Pin2(f) + ISP CLK
-   PA5          D5                D7                   Disp. Pin4(e) + ISP MISO
-   PA6          D6                D8                   Disp. Pin5(d) + ISP MOSI
-   PA7          D7                D9                   Disp. Pin6(DP)
-   PB2          D8                D10                  Disp. Pin7(c)
-   PB1          D9                D11                  Disp. Pin9(b)
-   PB0          D10               D12                  Disp. Pin10(a)
-                                                       Disp. Pin8 or 3 to R1
-                                  D13                  LCD   SCLK
-				  D14                  LCD   DIN
-				  D15                  LCD   D/C
-				  D16                  LCD   RST
-				  D17                  LCD   CS
-				                       LCD   Vcc
-						       LCD   GND
+   Attiny84-Pin Attiny84 ATtiny167-Pin ATtiny167 ProMini External
+                         PB0           D8(20)
+   PA0          D0       PA3           D3(4)     D2      Vibration switch
+   PA1          D1       PA0           D0(1)     D3      MS5611 SDA
+   PA2          D2       PA1           D1(2)     D4      MS5611 SCL
+                         PA6           D6(9)             MS5611 Vcc
+							 MS5611 GND
+   PA3          D3       PB3           D11(17)   D5      Disp. Pin1(g) 
+   PA4          D4       PB4           D12(14)   D6      Disp. Pin2(f) + ISP CLK
+   PA5          D5       PB5           D13(13)   D7      Disp. Pin4(e) + ISP MISO
+   PA6          D6       PB6           D14(12)   D8      Disp. Pin5(d) + ISP MOSI
+   PA7          D7       PA7           D7(10)    D9      Disp. Pin6(DP)
+   PB2          D8       PA5           D5(8)     D10     Disp. Pin7(c)
+   PB1          D9       PA4           D4(7)     D11     Disp. Pin9(b)
+   PB0          D10      PA2           D2(3)     D12     Disp. Pin10(a)
+                                                         Disp. Pin8 or 3 to R1
+				                 D13     LCD   SCLK
+				                 D14     LCD   DIN
+				                 D15     LCD   D/C
+				                 D16     LCD   RST
+				                 D17     LCD   CS
+				                         LCD   Vcc
+						         LCD   GND
 */
 
 #if defined(ATMEGA) && defined(DEB_LCD)
@@ -360,7 +368,7 @@ const char up_str[] PROGMEM ="UP";
 const char meter_str[] PROGMEM ="FEET";
 #else
 const char up_str[] PROGMEM ="UP";
-const char meter_str[] PROGMEM ="M";
+const char meter_str[] PROGMEM ="METER";
 #endif
 const char bye_str[] PROGMEM = "BYE.";
 const char error_str[] PROGMEM = "  ERROR";
@@ -369,7 +377,7 @@ const char sleep_str[] PROGMEM = "SP";
 const char lowbatt_str[] PROGMEM = "  BATT LO. ";
 const char go_str[] PROGMEM = "";
 const char up_str[] PROGMEM ="HOCH LAUFEN";
-const char meter_str[] PROGMEM ="M";
+const char meter_str[] PROGMEM ="METER";
 const char bye_str[] PROGMEM = "BYE.";
 const char error_str[] PROGMEM = "  FEHLER";
 const char sleep_str[] PROGMEM = "SP";
@@ -575,10 +583,10 @@ void resetAlti(void)
     idleDelay(5);
     if (i2c_start(ADDRESS | I2C_WRITE)) 
       if (i2c_write(0x1E)) {
-	i2c_stop();
 	idleDelay(6);
 	fail = false;
       }
+    i2c_stop();
     if (fail) {
       errcnt++;
       errcode = RESET_ERROR;
@@ -624,6 +632,7 @@ void paramAlti(void)
   }
 }
 
+
 float measurePress(int count)
 {
   float D1;
@@ -637,81 +646,92 @@ float measurePress(int count)
   float maxpress = 0;
 
   if (count <= 0) count = 1;
-  for (int i = 0; i < count && errcnt < MAXERRCNT; i++) {
-    D1 = getAltiVal(0x48); // Pressure raw
-    D2 = getAltiVal(0x58);// Temperature raw
-
-    /*
-    DEBTTY_PRINT(F("RAW PRESS: "))
-    DEBTTY_PRINTLN(D1)
-    DEBTTY_PRINT(F("RAW TEMP: "))
-    DEBTTY_PRINTLN(D2)
-    */
-
-    if (D1 != ERRORVAL && D2 != ERRORVAL) {
-      dT   = D2 - (C[5] * 256.0);
-      OFF  = C[2] * 65536.0 + ((dT * C[4])/128.0);
-      SENS = (C[1] * 32768.0) + ((dT * C[3])/256.0);
+  while (errcnt < MAXERRCNT) {
+    acc = 0;
+    maxpress = 0;
+    minpress = 5000.0;
+    
+    for (int i = 0; i < count && errcnt < MAXERRCNT; i++) {
+      D1 = getAltiVal(0x48); // Pressure raw
+      D2 = getAltiVal(0x58);// Temperature raw
       
-      TEMP = dT * C[6] / 8388608.0 + 2000.0;
-      
-      if(TEMP < 2000.0) // if temperature lower than 20 Celsius 
-	{
-	  int32_t T1    = 0;
-	  int64_t OFF1  = 0;
-	  int64_t SENS1 = 0;
-	  
-	  T1    = pow(dT, 2) / 2147483648;
-	  OFF1  = 5 * pow((TEMP - 2000), 2) / 2;
-	  SENS1 = 5 * pow((TEMP - 2000), 2) / 4;
-	  
-	  if(TEMP < -1500) // if temperature lower than -15 Celsius 
-	    {
-	      OFF1  = OFF1 + 7 * pow((TEMP + 1500), 2); 
-	      SENS1 = SENS1 + 11 * pow((TEMP + 1500), 2) / 2;
-	    }
-	  
-	  TEMP -= T1;
-	  OFF -= OFF1; 
-	  SENS -= SENS1;
+      if (D1 != ERRORVAL && D2 != ERRORVAL) {
+	dT   = D2 - (C[5] * 256.0);
+	OFF  = C[2] * 65536.0 + ((dT * C[4])/128.0);
+	SENS = (C[1] * 32768.0) + ((dT * C[3])/256.0);
+	
+	TEMP = dT * C[6] / 8388608.0 + 2000.0;
+	
+	if(TEMP < 2000.0) // if temperature lower than 20 Celsius 
+	  {
+	    int32_t T1    = 0;
+	    int64_t OFF1  = 0;
+	    int64_t SENS1 = 0;
+	    
+	    T1    = pow(dT, 2) / 2147483648;
+	    OFF1  = 5 * pow((TEMP - 2000), 2) / 2;
+	    SENS1 = 5 * pow((TEMP - 2000), 2) / 4;
+	    
+	    if(TEMP < -1500) // if temperature lower than -15 Celsius 
+	      {
+		OFF1  = OFF1 + 7 * pow((TEMP + 1500), 2); 
+		SENS1 = SENS1 + 11 * pow((TEMP + 1500), 2) / 2;
+	      }
+	    
+	    TEMP -= T1;
+	    OFF -= OFF1; 
+	    SENS -= SENS1;
+	  }
+	if (TEMP < -7000.0 || TEMP > 12000.0) { // almost impossible temperatures
+	  errcnt++;
+	  errcode = TEMP_ERROR;
+	  if (errcnt < MAXERRCNT) { // reset the chip again
+	    resetAlti();
+	    i--; // redo last measurement
+	    continue;
+	  } else {
+	    DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"))
+	      return(0);
+	  }
 	}
-      if (TEMP < -7000.0 || TEMP > 12000.0) { // almost impossible temperatures
-	errcnt++;
-	errcode = TEMP_ERROR;
-      }
-      P = (D1 * SENS / 2097152 - OFF) / 32768 / 100.0;
-      /*
-      DEBTTY_PRINT(F("TEMP="))
-      DEBTTY_PRINTLN(TEMP)
-      DEBTTY_PRINT(F("P="))
-      DEBTTY_PRINTLN(P)
-      */
-      if (P < 600.0 || P > 1200.0) { // almost impossible pressures up to 4000 meters elevation
-	errcnt++;
-	errcode = PRESS_ERROR;
-      }
-      acc  += P;
-      if (minpress > P) minpress = P;
-      if (maxpress < P) maxpress = P;
-    } else {
-      errcnt++;
-      errcode = CONV_ERROR;
-      DEBTTY_PRINTLN(F("Measure command unsuccessful"))
-      if (errcnt < MAXERRCNT) { // reset the chip again
-	resetAlti();
-	i--; // redo last measurement
+	P = (D1 * SENS / 2097152 - OFF) / 32768 / 100.0;
+
+	if (P < 600.0 || P > 1200.0) { // almost impossible pressures up to 4000 meters elevation
+	  errcnt++;
+	  errcode = PRESS_ERROR;
+	   if (errcnt < MAXERRCNT) { // reset the chip again
+	    resetAlti();
+	    i--; // redo last measurement
+	    continue;
+	  } else {
+	    DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"))
+	      return(0);
+	  }
+	}
+	acc  += P;
+	if (minpress > P) minpress = P;
+	if (maxpress < P) maxpress = P;
       } else {
-	DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"))
-	return(0);
+	errcnt++;
+	errcode = CONV_ERROR;
+	DEBTTY_PRINTLN(F("Measure command unsuccessful"))
+	  if (errcnt < MAXERRCNT) { // reset the chip again
+	    resetAlti();
+	    i--; // redo last measurement
+	  } else {
+	    DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"))
+	      return(0);
+	  }
       }
     }
-  }
-  if (maxpress-minpress > MAXOUTLIER) { // if more than 0.6 hPa resp. 5 meters diff
-    errcnt = MAXERRCNT;
-    errcode = OUTLIER_ERROR;
+    if (maxpress-minpress > MAXOUTLIER) { // if more than 0.6 hPa resp. 5 meters diff
+      errcnt++;
+      errcode = OUTLIER_ERROR;
+    } else break;
   }
   return (acc/count);
 }
+
 
 float measurePressWithRecovery(int count)
 {
@@ -1100,14 +1120,14 @@ void loop()
 	  resetlevel++;
 	  displayPString(go_str);
 	  displayChar(' ');
-	  resetlevel = 0;
 	  if (sleeplevel == 0) sleeplevel = 1;
 	  displayNum(int(decimeters_up/CONVFAC));
-	if (sleeplevel == 1) sleeplevel = 0;
-	displayChar(' ');
-	displayPString(meter_str);
-	displayChar(' ');
-	displayPString(up_str);
+	  if (sleeplevel == 1) sleeplevel = 0;
+	  displayChar(' ');
+	  resetlevel = 0;
+	  displayPString(meter_str);
+	  displayChar(' ');
+	  displayPString(up_str);
 	}
       }
     } else {
