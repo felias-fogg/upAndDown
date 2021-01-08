@@ -4,12 +4,12 @@
    and then bringing them down again
    Uses the MS5611 altimeter/barometer
 
-   Developed on an Arduino Pro Mini, deployed on a Attiny84.
-   PCB is the Open-V2 board that fits together with a 3.6V/2400mA lithium
+   Developed on an Arduino Pro Mini, deployed on a ATtiny84, meanwhile ATtiny167
+   PCB is the Open-V3a board that fits together with a 3.6V/2400mA lithium
    battery into a preform tube (15cm)
 
    ATtiny Fusebits: Divide clock by 8, Brown-out disabled
-   Arduino board: ATtiny 84 / 1MHz
+   Arduino board: ATtiny 167 / 1MHz
 */
 
 
@@ -57,8 +57,18 @@
  *             - ignoring bad measurements (but increasing errcnt!)
  *             - RESET can be activated when key is pressed five times during GO or number.
  *             - added ADDRESS constant to SETTING-specific settings
+ * Version 4.0
+ *             - added ATtiny167 as one of the possibilities, which now allows to power-cycle the MS5611
+ *             - not yet fully integrated!
+ *             - resetAlti does no internal recovery, this is now handled externally.
+ *             - For ATtiny84, we added some recovery mechanism, when SDA is stuck. I am not sure, if 
+ *               it helps all the time!
+ *            
+ * Version 4.1 (24.5.2020)
+ *            - When volt < LOWBATT_ERR then we check again and reset the error bit EEPROM if volt is above limit.
+ *              This means, it does not get stuck when we have one wrong measurement, as it seemed to have happened here!
  */
-#define Version "3.2"
+#define Version "4.1"
 
 #include <avr/wdt.h>
 #include <avr/sleep.h>
@@ -69,7 +79,7 @@
 #define HOME_SETTING 2
 #define DAGSTUHL_SETTING 3
 
-#define SETTING SCHOENBERG_SETTING
+#define SETTING DAGSTUHL_SETTING
 
 #if SETTING==HOME_SETTING
 #define MAXWAKEUP_NOBUMP 60 // if there is no bump, we go to sleep again 
@@ -81,8 +91,7 @@
 #define INTREFVOLTAGE 1120
 #define OLD_I2C_WIRING // define if first board (= dragon) is used, depends of course!
 #define ADDRESS 0xEC // depends, of course!
-#endif
-#if SETTING==DAGSTUHL_SETTING
+#elif SETTING==DAGSTUHL_SETTING
 #define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
 #define MAXWAKEUP_TOTAL 3600 // 60 minutes for wakeup & start climbing
 #define MINQUIET 540 // 10 minutes no bump means we are back in the box
@@ -93,8 +102,7 @@
 #define IMPERIAL // measures in feet
 #define INTREFVOLTAGE 1112
 #define ADDRESS 0xEE // 8-bit I2C address of MS5611 (CSB not connected to Vcc)
-#endif
-#if SETTING==SCHOENBERG_SETTING
+#elif SETTING==SCHOENBERG_SETTING
 #define MAXWAKEUP_NOBUMP 120 // if there is no bump, we go to sleep again 
 #define MAXWAKEUP_TOTAL 1800 // 30 minutes for wakeup & start climbing
 #define MINQUIET 300 // 5 minutes no bump means we are back in the box
@@ -104,6 +112,8 @@
 #define OLD_I2C_WIRING // define if first board (= dragon) is used!
 #define INTREFVOLTAGE 1120
 #define ADDRESS 0xEC // 8-bit I2C address of MS5611 (CSB connected to Vcc)
+#else
+#error "Undefined setting"
 #endif
 
 
@@ -133,7 +143,7 @@ uint8_t eelowvolterr[1] EEMEM;
 
 #define DISPLAY_ON_MSECS 1000 // msecs on
 #define DISPLAY_OFF_MSECS 300 // msecs off
-#define MAXERRCNT 10 // after that many measurement errors we give up
+#define MAXERRCNT 20 // after that many measurement errors we give up
 #define MAXRETRYCNT 5 // number of retries in reset and param command
 #define LOWVOLT_WARN 280 // warning that battery is low
 #define LOWVOLT_ERR 230 // with that we do not startup anymore!
@@ -154,10 +164,6 @@ uint8_t eelowvolterr[1] EEMEM;
 #define OUTLIER_ERROR 'A'
 #define I2C_ERROR 'C'
 
-
-#if (__AVR_ARCH__  == 5) // means ATMEGA 
-#define ATMEGA
-#endif
 
 /* On the PCB (or breadboard) put in the the following electronic components:
 
@@ -187,7 +193,7 @@ uint8_t eelowvolterr[1] EEMEM;
 
    On breadboard connect:
    Attiny84-Pin Attiny84 ATtiny167-Pin ATtiny167 ProMini External
-                         PB0           D8(20)
+                         PB0           D8(20)            Button
    PA0          D0       PA3           D3(4)     D2      Vibration switch
    PA1          D1       PA0           D0(1)     D3      MS5611 SDA
    PA2          D2       PA1           D1(2)     D4      MS5611 SCL
@@ -201,6 +207,7 @@ uint8_t eelowvolterr[1] EEMEM;
    PB2          D8       PA5           D5(8)     D10     Disp. Pin7(c)
    PB1          D9       PA4           D4(7)     D11     Disp. Pin9(b)
    PB0          D10      PA2           D2(3)     D12     Disp. Pin10(a)
+                         PB2           D10(18)   D1      Serial TX
                                                          Disp. Pin8 or 3 to R1
 				                 D13     LCD   SCLK
 				                 D14     LCD   DIN
@@ -211,85 +218,126 @@ uint8_t eelowvolterr[1] EEMEM;
 						         LCD   GND
 */
 
-#if defined(ATMEGA) && defined(DEB_LCD)
+#if defined(DEB_LCD)
 //#include <Adafruit_GFX.h>
 //#include <Adafruit_PCD8544.h>
 //Adafruit_PCD8544 lcd = Adafruit_PCD8544(13,14,15,17,16); 
 #endif
 
 // differences between Atmega and Attiny
-#ifdef ATMEGA
-#define POFF 2
-#define T1_vect TIMER1_OVF_vect
-#define PCINT_vect PCINT2_vect
-#define SDA_PORT PORTD
-#define SDA_PIN 3
-#define SCL_PORT PORTD
-#define SCL_PIN 4
+#if defined(__AVR_ATmega328P__)
+  #define SEGAPIN 12
+  #define SEGBPIN 11
+  #define SEGCPIN 10
+  #define SEGDPPIN 9
+  #define SEGDPIN  8
+  #define SEGEPIN  7
+  #define SEGFPIN  6
+  #define SEGGPIN  5
+  #define T1_vect TIMER1_OVF_vect
+  #define PCINT_vect PCINT2_vect
+  #define SDA_PORT PORTD
+  #define SDA_PIN 3
+  #define SCL_PORT PORTD
+  #define SCL_PIN 4
+#elif defined(__AVR_ATtiny84__)
+  #define SEGAPIN 10
+  #define SEGBPIN  9
+  #define SEGCPIN  8
+  #define SEGDPPIN 7
+  #define SEGDPIN  6
+  #define SEGEPIN  5
+  #define SEGFPIN  4
+  #define SEGGPIN  3
+  #define T1_vect TIM1_OVF_vect
+  #define PCINT_vect PCINT0_vect
+  // I2C pins - now conforms to description above!
+  #define SDA_PORT PORTA
+  #define SCL_PORT PORTA
+  #ifdef OLD_I2C_WIRING // as on the dragon board!
+    #define SDA_PIN 2
+    #define SCL_PIN 1
+  #else                // as described above and on the new boards
+    #define SDA_PIN 1
+    #define SCL_PIN 2
+  #endif
+#elif defined(__AVR_ATtiny167__)
+  #define SEGAPIN  2
+  #define SEGBPIN  4
+  #define SEGCPIN  5
+  #define SEGDPPIN 7
+  #define SEGDPIN  14
+  #define SEGEPIN  13
+  #define SEGFPIN  12
+  #define SEGGPIN  11
+  #define T1_vect TIMER1_OVF_vect
+  #define PCINT_vect PCINT0_vect
+  #define PCINTBUTTON_vect PCINT1_vect
+  #define WDTCSR WDTCR
+  #define SDA_PORT PORTA
+  #define SCL_PORT PORTA
+  #define SDA_PIN 0
+  #define SCL_PIN 1
+  #define SDA_ARDUINO_PIN 0
+  #define SCL_ARDUINO_PIN 1
+  #define MS_POWER 6
+  #define BUTTON 8
+  #include <TXOnlySerial.h>
+  #ifdef DEB_TTY
+    Serial TXOnlySerial(10);
+  #endif
 #else
-#define POFF 0
-#define T1_vect TIM1_OVF_vect
-#define PCINT_vect PCINT0_vect
-// I2C pins - now conforms to description above!
-#define SDA_PORT PORTA
-#define SCL_PORT PORTA
-#ifdef OLD_I2C_WIRING // as on the dragon board!
-#define SDA_PIN 2
-#define SCL_PIN 1
-#else                // as described above and on the new boards
-#define SDA_PIN 1
-#define SCL_PIN 2
+  #error "Unsupported MCU"
 #endif
-#endif
+
 
 #include <SoftI2CMaster.h>
 
-#if  defined(DEB_TTY) && defined(ATMEGA)
-#define DEBTTY_PRINT(str) \
-  Serial.print(str);
-#define DEBTTY_PRINTLN(str) \
-  Serial.println(str);
+#if  defined(DEB_TTY) 
+#define DEBTTY_PRINT(str) Serial.print(str)
+#define DEBTTY_PRINTLN(str) Serial.println(str)
+#define DEBTTY_INIT() Serial.begin(9600)
 #else
 #define DEBTTY_PRINT(str)
 #define DEBTTY_PRINTLN(str)
+#define DEBTTY_INIT()
 #endif
 
-#if  defined(DEB_LCD) && defined(ATMEGA)
-#define DEBLCD_PRINT(str) \
-  lcd.print(str);
-#define DEBLCD_PRINTLN(str) \
-  lcd.println(str);
-#define DEBLCD_HOME() \
-  lcd.setCursor(0,0);
-#define DEBLCD_DISPLAY() \
-  lcd.display();
-#define DEBLCD_CLEAR() \
-  lcd.clearDisplay();
+#if  defined(DEB_LCD) 
+#define DEBLCD_PRINT(str) lcd.print(str)
+#define DEBLCD_PRINTLN(str) lcd.println(str)
+#define DEBLCD_HOME() lcd.setCursor(0,0)
+#define DEBLCD_DISPLAY() lcd.display()
+#define DEBLCD_CLEAR() lcd.clearDisplay()
+#define DBLCD_INIT()   lcd.begin()
 #else
 #define DEBLCD_PRINT(str)
 #define DEBLCD_PRINTLN(str)
 #define DEBLCD_HOME()
 #define DEBLCD_DISPLAY()
 #define DEBLCD_CLEAR()
+#define DEBLCD_INIT()
 #endif
 
 // error value for measurements
 #define ERRORVAL -9999.0
 
+
 // LCD segment definitions. 
 // These will need to be changed depending on the 
 // wiring of your output port to the segements.
-#define SEGa (1<<(10+POFF))
-#define SEGb (1<<(9+POFF))
-#define SEGc (1<<(8+POFF))
-#define SEGd (1<<(6+POFF))
-#define SEGe (1<<(5+POFF))
-#define SEGf (1<<(4+POFF))
-#define SEGg (1<<(3+POFF))
-#define SEGdp (1<<(7+POFF))
+#define SEGa (1<<SEGAPIN)
+#define SEGb (1<<SEGBPIN)
+#define SEGc (1<<SEGCPIN)
+#define SEGd (1<<SEGDPIN)
+#define SEGe (1<<SEGEPIN)
+#define SEGf (1<<SEGFPIN)
+#define SEGg (1<<SEGGPIN)
+#define SEGdp (1<<SEGDPPIN)
+
 
 const uint8_t lcd_seg[] =
-  { (10+POFF), (9+POFF), (8+POFF), (6+POFF), (5+POFF), (4+POFF), (3+POFF), (7+POFF) };
+  { SEGAPIN, SEGBPIN, SEGCPIN, SEGDPIN, SEGEPIN, SEGFPIN, SEGGPIN, SEGDPPIN };
 
 
 // LCD Character Generator 
@@ -398,7 +446,7 @@ const char sleep_str[] PROGMEM = "SP";
 #define LAST_STATE 8
 
 
-#if defined(ATMEGA) && (defined(DEB_TTY) || defined(DEB_LCD))
+#if (defined(DEB_TTY) || defined(DEB_LCD))
 char statestr[14][12] = { "UNDEF", "SLEEP", "WAKEUP", 
 			  "CLIMB", "SUMMIT", "BATT_LOW", "ERROR", 
 			  "DEEP_SLEEP" };
@@ -429,6 +477,7 @@ volatile float refPress __attribute__ ((section (".noinit")));
 // measurement converted to height above zero level
 volatile int height __attribute__ ((section (".noinit")));
 // last height when making measurement
+
 volatile int lastheight __attribute__ ((section (".noinit")));
 
 volatile uint8_t sleeplevel __attribute__ ((section (".noinit")));
@@ -482,10 +531,21 @@ ISR(WDT_vect)
   seconds++;
 }
 
+// vibration switch
 ISR(PCINT_vect)
 {
   bumped = true;
 }
+
+// button (if not directly connected to reset)
+#ifdef PCINTBUTTON_vect
+ISR(PCINTBUTTON_vect)
+{
+  wdt_enable(WDTO_15MS);
+  WDTCSR &= ~(1<<WDIE); // disable WDT interrupt, leads to soft reset
+  while(1);
+}
+#endif
 
 void startTimerOne(void) {
   TCCR1A = 0;
@@ -573,39 +633,29 @@ float getAltiVal(byte code)
   return ret;
 }
 
-void resetAlti(void)
+bool resetAlti(void)
 {
-  int retrycnt = 0;
   bool fail = true;
-  while (fail && retrycnt++ < MAXRETRYCNT && errcnt < MAXERRCNT) {
-    i2c_start(0 | I2C_WRITE);
-    i2c_stop();
-    idleDelay(5);
-    if (i2c_start(ADDRESS | I2C_WRITE)) 
-      if (i2c_write(0x1E)) {
-	idleDelay(6);
-	fail = false;
-      }
-    i2c_stop();
-    if (fail) {
-      errcnt++;
-      errcode = RESET_ERROR;
-      DEBTTY_PRINTLN(F("Reset command unsuccessfull"))
-	idleDelay(10);
+  if (i2c_start(ADDRESS | I2C_WRITE)) 
+    if (i2c_write(0x1E)) {
+      idleDelay(6);
+      fail = false;
     }
-  }
+  i2c_stop();
   if (fail) {
-    errcnt = MAXERRCNT;
-    DEBTTY_PRINTLN(F("*** Fatal error in reset command exec"))
+    errcnt++;
+    errcode = RESET_ERROR;
+    DEBTTY_PRINTLN(F("Reset command unsuccessfull"));
   }
+  return (!(fail));
 }
 
 void paramAlti(void)
 {
   bool fail = true;
   int retrycnt = 0;
-  DEBTTY_PRINTLN("")
-  DEBTTY_PRINTLN(F("PROM COEFFICIENTS"))
+  DEBTTY_PRINTLN("");
+  DEBTTY_PRINTLN(F("PROM COEFFICIENTS"));
   while (fail && retrycnt++ < MAXRETRYCNT && errcnt < MAXERRCNT) {
     fail = false;
     for (int i=0; i<6 && !fail ; i++) {
@@ -615,20 +665,20 @@ void paramAlti(void)
       if (!fail && !i2c_start(ADDRESS | I2C_READ)) fail = true;
       C[i+1] = i2c_read(false) << 8 | i2c_read(true);
       i2c_stop();
-      DEBTTY_PRINTLN(C[i+1])
+      DEBTTY_PRINTLN(C[i+1]);
       if (fail) {
-	DEBTTY_PRINTLN(F("Prom command unsuccessfull"))
-	errcode = PARAM_ERROR;
+	DEBTTY_PRINTLN(F("Prom command unsuccessfull"));
 	errcnt++;
-	resetAlti(); // try another reset
+	recoverFromI2cProblem();
+	errcode = PARAM_ERROR;
 	idleDelay(10);
       }
     }
-    DEBTTY_PRINTLN("")
+    DEBTTY_PRINTLN("");
   }
   if (fail) {
     errcnt = MAXERRCNT;
-    DEBTTY_PRINTLN(F("*** Fatal error in prom command"))
+    DEBTTY_PRINTLN(F("*** Fatal error in prom command"));
   }
 }
 
@@ -690,7 +740,7 @@ float measurePress(int count)
 	    i--; // redo last measurement
 	    continue;
 	  } else {
-	    DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"))
+	    DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"));
 	      return(0);
 	  }
 	}
@@ -704,7 +754,7 @@ float measurePress(int count)
 	    i--; // redo last measurement
 	    continue;
 	  } else {
-	    DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"))
+	     DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"));
 	      return(0);
 	  }
 	}
@@ -714,12 +764,13 @@ float measurePress(int count)
       } else {
 	errcnt++;
 	errcode = CONV_ERROR;
-	DEBTTY_PRINTLN(F("Measure command unsuccessful"))
+	DEBTTY_PRINTLN(F("Measure command unsuccessful"));
 	  if (errcnt < MAXERRCNT) { // reset the chip again
-	    resetAlti();
+	    recoverFromI2cProblem();
 	    i--; // redo last measurement
+	    errcode = CONV_ERROR;
 	  } else {
-	    DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"))
+	    DEBTTY_PRINTLN(F("*** Fatal abort because too many measurement errors"));
 	      return(0);
 	  }
       }
@@ -761,10 +812,14 @@ int readVoltage(void)
   ADCSRA |= (1<<ADEN); // switch on ADC  
   idleDelay(20);
 
-#ifdef ATMEGA
+#if defined(__AVR_ATmega328P__)
   ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
-#else
+#elif defined(__AVR_ATtiny84__)
   ADMUX = _BV(MUX5) | _BV(MUX0);
+#elif defined(__AVR_ATtiny167__)
+  ADMUX = _BV(MUX3) | _BV(MUX2);
+#else
+  #error "Unsupported MCU"
 #endif
 
   idleDelay(20); // Wait for Vref to settle
@@ -775,10 +830,10 @@ int readVoltage(void)
   reading = ADC;
   result = (((INTREFVOLTAGE * 1023L) / ADC) + 5L) / 10L;
 
-  DEBTTY_PRINT(F("Raw voltage: "))
-  DEBTTY_PRINTLN(reading)
-  DEBTTY_PRINT(F("Voltage:  "))
-  DEBTTY_PRINTLN(result)
+  DEBTTY_PRINT(F("Raw voltage: "));
+  DEBTTY_PRINTLN(reading);
+  DEBTTY_PRINT(F("Voltage:  "));
+  DEBTTY_PRINTLN(result);
 
   ADCSRA &= ~(_BV(ADEN)); // switch off ADC
   return result;
@@ -817,21 +872,31 @@ void wdt_init(void)
 
 void enablePinChangeIRQ(void) 
 {
-#ifdef ATMEGA
+#if defined(__AVR_ATmega328P__)
   PCICR |= (1<<PCIE2); // allow for PCINT on PCINT16-23
   PCMSK2 |= (1<<PCINT18); // on pin PD2 = PCINT18 = dig. pin 2
-#else
+#elif defined(__AVR_ATtiny84__)
   GIMSK |= (1<<PCIE0);  // allow for PCINT on PA0-PA7
   PCMSK0 |= (1<<PCINT0); // on pin PA0 = ADC0 = analog0 = dig. pin 0
+#elif defined(__AVR_ATtiny167__)
+  PCICR |= (1<<PCIE0) | _BV(PCIE1); // allow interrupts on both ports
+  PCMSK0 |= (1<<PCINT3); // vibration switch
+  PCMSK1 |= (1<<PCINT8); // button
+#else
+  error "MCU not supported"
 #endif
 }
 
-void disablePinChangeIRQ(void) 
+void disableVibIRQ(void) 
 {
-#ifdef ATMEGA
+#if defined(__AVR_ATmega328P__)
   PCICR &= ~(1<<PCIE2); // disable PCINT on PCINT16-23
-#else
+#elif defined(__AVR_ATtiny84__)
   GIMSK &= ~(1<<PCIE0);  // disable PCINT on PA0-PA7
+#elif defined(__AVR_ATtiny167__)
+  PCICR &= ~(1<<PCIE0);
+#else
+  #error "MCU not supported"
 #endif
 }
 
@@ -880,20 +945,55 @@ void gosleep(void)
 {
   wdt_disable(); // no more seconds counting
   IOoff(); // no more IO
+#ifdef MS_POWER
+  // powerdown the MS5611
+  pinMode(SDA_ARDUINO_PIN, INPUT);
+  pinMode(SCL_ARDUINO_PIN, INPUT);
+  pinMode(MS_POWER, INPUT);
+#endif
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
   sleep_mode(); // sleep & wait for reset
 }
 
-void setup() {
-#if defined(ATMEGA) && defined(DEB_TTY)
-  Serial.begin(19200); 
+// power-cycle or just toggle the clock-line
+void recoverFromI2cProblem(void)
+{
+  byte retry = 5;
+  while (retry--) {
+#ifdef MS_POWER
+    // power-cycle the chip
+    pinMode(SDA_ARDUINO_PIN, INPUT);
+    pinMode(SCL_ARDUINO_PIN, INPUT);
+    pinMode(MS_POWER, INPUT);
+    idleDelay(30);
+    pinMode(MS_POWER, OUTPUT);
+    digitalWrite(MS_POWER, HIGH);
+#else
+    // try to recover by toggling the clock line
+    i2c_write(0x00);
+    i2c_write(0x00);
+    i2c_stop();
 #endif
-#if defined(ATMEGA) && defined(DEB_LCD)
-  lcd.begin();
+    if (i2c_init()) 
+      if (resetAlti()) 
+	return;
+    errcnt++;
+    errcnt = I2C_ERROR;
+  }
+}
+
+void setup() {
+  DEBTTY_INIT();
+  DEBLCD_INIT();
+  DEBTTY_PRINTLN(F("Initializing ..."));
+#ifdef MS_POWER
+  delay(20);
+  pinMode(MS_POWER, OUTPUT);
+  digitalWrite(MS_POWER, HIGH); // power-up the MS5611
+  delay(10);
 #endif
   if (!i2c_init()) {
-    errcnt = MAXERRCNT;
-    errcode = I2C_ERROR;
+    recoverFromI2cProblem();
   }
   if (magickey1 == MKEY1 && 
       eeprom_read_word(&eemagickey2[0]) == MKEY2) {
@@ -929,8 +1029,13 @@ void setup() {
   idleDelay(30);
   volt = readVoltage();
   if (volt < LOWVOLT_ERR) 
-    if (readVoltage()  < LOWVOLT_ERR && eeprom_read_byte(&eelowvolterr[0]) != 0)
+    if (readVoltage()  < LOWVOLT_ERR) {
+      if (eeprom_read_byte(&eelowvolterr[0]) != 0)
 	eeprom_write_byte(&eelowvolterr[0],0);
+    } else {
+      if (eeprom_read_byte(&eelowvolterr[0]) == 0)
+	eeprom_write_byte(&eelowvolterr[0],0xFF);
+    }
   digitalWrite(lcd_seg[7],LOW); 
   DEBTTY_PRINT(F("Voltage: "));
   DEBTTY_PRINTLN(volt);
@@ -985,7 +1090,11 @@ void setup() {
   epsilon =  (byte)eeprom_read_byte(&eepsilon[0])*10;
 
   // display summit string if last_state == NO_STATE, i.e. fresh start
-  if (laststate == NO_STATE) displaySummitString();
+  if (laststate == NO_STATE) {
+    displaySummitString();
+    delay(1000);
+    displayNum(volt);
+  }
 }
 
 void loop()
@@ -1047,28 +1156,28 @@ void loop()
   //  displayNum(state);
   //  displayNum(sleeplevel);
 
-  DEBLCD_CLEAR()
-  DEBLCD_HOME()
+  DEBLCD_CLEAR();
+  DEBLCD_HOME();
   if (laststate != state) {
-    DEBTTY_PRINT(F("New state: "))
-    DEBTTY_PRINTLN(statestr[state])
+    DEBTTY_PRINT(F("New state: "));
+    DEBTTY_PRINTLN(statestr[state]);
     laststate = state;
     setSeconds(lastchange);
   }
-  DEBLCD_PRINTLN(statestr[state])
-  DEBLCD_PRINT(F("Volt:   "))
-  DEBLCD_PRINTLN(volt)
-  DEBLCD_PRINT(F("Height: "))
-  DEBLCD_PRINTLN(height)
-  DEBLCD_PRINT(F("Time:   "))
-  DEBLCD_PRINTLN(getSeconds())
-  DEBLCD_PRINT(F("P/B: "))
-  DEBLCD_PRINT(getSeconds()-lastpress)
-  DEBLCD_PRINT(F("/"))
-  DEBLCD_PRINTLN(getSeconds()-lastbump)
-  DEBLCD_PRINT(F("RefP:   "))
-  DEBLCD_PRINTLN(refPress)
-  DEBLCD_DISPLAY()
+  DEBLCD_PRINTLN(statestr[state]);
+  DEBLCD_PRINT(F("Volt:   "));
+  DEBLCD_PRINTLN(volt);
+  DEBLCD_PRINT(F("Height: "));
+  DEBLCD_PRINTLN(height);
+  DEBLCD_PRINT(F("Time:   "));
+  DEBLCD_PRINTLN(getSeconds());
+  DEBLCD_PRINT(F("P/B: "));
+  DEBLCD_PRINT(getSeconds()-lastpress);
+  DEBLCD_PRINT(F("/"));
+  DEBLCD_PRINTLN(getSeconds()-lastbump);
+  DEBLCD_PRINT(F("RefP:   "));
+  DEBLCD_PRINTLN(refPress);
+  DEBLCD_DISPLAY();
 
   switch(state) {
 
@@ -1207,7 +1316,7 @@ void loop()
 
   case DEEPSLEEP_STATE: // sleep for transport
     displayPString(sleep_str);
-    disablePinChangeIRQ();
+    disableVibIRQ();
     state = SLEEP_STATE;
     sleeplevel = 0;
     gosleep();
