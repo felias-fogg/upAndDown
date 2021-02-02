@@ -464,7 +464,7 @@ volatile uint8_t state __attribute__ ((section (".noinit")));
 volatile uint8_t laststate __attribute__ ((section (".noinit")));
 // This counter is advanced by the wdt interrupt - started after wakeup
 volatile uint16_t seconds __attribute__ ((section (".noinit"))); 
-// Keeping track when last bump happened (using secods)
+// Keeping track when last bump happened (using seconds)
 uint16_t lastbump __attribute__ ((section (".noinit"))); 
 // last time the reset button was pressed
 uint16_t lastpress __attribute__ ((section (".noinit"))); 
