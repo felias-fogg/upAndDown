@@ -9,10 +9,18 @@
 
    ATtiny Fusebits: Divide clock by 8, internal OSC., Brown-out disabled, preserve EEPROM
    Arduino board: ATtiny 1634 / 1MHz
+
+   Special modes:
+   - Press button 5 times before the first character is scrolled away: RESET and recalibrate height
+   - Press button when 2nd, 3rd, 4th, 5th, and 6th character is shown: TRANSPORT mode
+     This mode can only be be exited by pressing the button once and then three times after the middle dot blinked.
+   - Press button 5 times when the sixth character is shown: Display statistics.
+     Exit this mode by pressing the button. When the button is pressed while "PRESS TO CLEAR" is shown, memory
+     is cleared.
 */
 
-#define VERSION "5.0.1"
-#define DEBUG
+#define VERSION "5.0.2"
+//#define DEBUG
 
 /* Version 0.9 - first version out in the wild
  * Version 1.0 - switched to SoftI2CMaster (faster and less memory consumption)
@@ -69,7 +77,7 @@
  *            - When volt < LOWBATT_ERR then we check again and reset the error bit EEPROM if volt is above limit.
  *              This means, it does not get stuck when we have one wrong measurement, as it seemed to have happened here!
  *
- * Version 5.0.1
+ * Version 5.0.1 (1.2.2021)
  *           - Now we have a dot matrix display and attiny1634, which gives us more pins, more flash memory and more
  *             RAM. We therefore use now libraries for driving the display and reading the sensor. And it will be
  *             much easier for the user to understand us, because of the dot matrix display.
@@ -77,6 +85,9 @@
  *           - Use WDT in order to detect I2C stuck conditions.
  *           - Added statistics mode
  *           - All in all, pretty much of the program has been rewritten.
+ *
+ * Version 5.0.2 (3.2.2021)
+ *           - switched to TXOnlySerial for serial debug communication
  */
 
 #include <avr/wdt.h>
@@ -90,6 +101,9 @@
 #include <DotMatrix5x7.h>
 #include <Vcc.h>
 #include <ArduinoSort.h>
+#ifdef DEBUG
+#include <TXOnlySerial.h>
+#endif
 
 // Fuse settings:
 #define LOW_FUSE 0x62 // divide clock by 8, use internal ascillator
@@ -100,19 +114,27 @@
 #define SCROLLMS 50
 #define SHOWMS 650
 
+// level for entering special modes
+#ifdef DEBUG
+#define MAXLEVEL 2
+#else
+#define MAXLEVEL 5
+#endif
+
 // repetition
 #ifndef DEBUG
 #define ERROR_REPEAT 4
 #else
 #define ERROR_REPEAT 2
 #endif
-#define GREETING_REPEAT 5
+#define GREETING_REPEAT 4
 #define EXPLANATION_REPEAT 2
+#define LONG_REPEAT 2
 
 // measurement
 #ifdef DEBUG
-#define MAXSAMPLE 30 // we take this many samples
-#define THROWAWAY 5 // this many lowest and highest samples will be thrown away (in order to ignore outliers)
+#define MAXSAMPLE 100 // we take this many samples
+#define THROWAWAY 20 // this many lowest and highest samples will be thrown away (in order to ignore outliers)
 #else
 #define MAXSAMPLE 100 // we take this many samples
 #define THROWAWAY 20 // this many lowest and highest samples will be thrown away (in order to ignore outliers)
@@ -179,16 +201,18 @@
 
 #define MAXERRCNT 5 // after that many errors we give up
 #define BATT_WEAK 2400 // warning that battery is low
-#define BATT_EMPTY 2000 // battery almost emptx, give error!
+#define BATT_EMPTY 2100 // battery almost empty, give error!
 
 /* Debug macros */
 #ifdef DEBUG
-#define DEBPR(str) Serial.print(str)
-#define DEBLN(str) Serial.println(str)
 #if defined(__AVR_ATtiny1634__)
-#define DEBINIT() { Serial.begin(9600); UCSR0B&=~(1<<RXEN0); }
+#define DEBINIT()  mySerial.begin(9600)
+#define DEBPR(str) mySerial.print(str)
+#define DEBLN(str) mySerial.println(str)
 #else
 #define DEBINIT() Serial.begin(9600)
+#define DEBPR(str) Serial.print(str)
+#define DEBLN(str) Serial.println(str)
 #endif
 #else
 #define DEBPR(str)
@@ -198,24 +222,21 @@
 
 /* error codes */
 #define NO_ERROR -1
-#define INIT_STUCK_ERROR 0
-#define TWI_CONNECT_ERROR 1
-#define TWI_STUCK_ERROR 2
-#define PROMID_ERROR 3
-#define CRC_ERROR 4
-#define TEMP_OUTLIER_ERROR 5
-#define PRESS_OUTLIER_ERROR 6
-#define FATAL_ERROR WAKEUP_ERROR
-#define WAKEUP_ERROR 7
-#define STATE_ERROR 8
-#define BATT_ERROR 9
-#define TOO_LONG_ERROR 10
-#define BROWN_OUT_ERROR 11
-#define UNDEF_RESTART_ERROR 12
-#define OSCCAL_ERROR 13
-#define INTREF_ERROR 14
-#define FUSE_ERROR 15
-#define ERROR_NUM 16
+#define TWI_ERROR 0
+#define PROMID_ERROR 1
+#define CRC_ERROR 2
+#define TEMP_OUTLIER_ERROR 3
+#define PRESS_OUTLIER_ERROR 4
+#define FATAL_ERROR WAKEUP_ERROR // from here on, errors are not recoverable
+#define WAKEUP_ERROR 5
+#define STATE_ERROR 6
+#define BATT_ERROR 7
+#define BROWN_OUT_ERROR 8
+#define UNDEF_RESTART_ERROR 9
+#define OSCCAL_ERROR 10
+#define INTREF_ERROR 11
+#define FUSE_ERROR 12
+#define ERROR_NUM 13
 
 /* messages */
 #ifndef ENGLISH
@@ -223,6 +244,7 @@ const char PROGMEM recalib[] = "Neustart!";
 const char PROGMEM greeting[] = "Dr" uUML "cke meinen Knopf!";
 const char PROGMEM explain[] = EXPLAIN_STR;
 const char PROGMEM message1[] = "Bring mich noch";
+const char PROGMEM shortmessage1[] = "Noch";
 const char PROGMEM message2[] = "Meter h" oUML "her.";
 const char PROGMEM message3[] = "  ... Angekommen!";
 const char PROGMEM thanks[] = "Vielen Dank!";
@@ -230,9 +252,7 @@ const char PROGMEM reveal[] = SUMMIT_STR;
 const char PROGMEM battweak[] = "Die Batterie ist fast leer!";
 const char PROGMEM bye[] = "Tsch" uUML "ss";
 const char PROGMEM transport[] = "Transportmodus";
-const char PROGMEM init_stuck_error[] = "Initialisierungs-Fehler";
-const char PROGMEM twi_connect_error[] = "TWI-Verbindungs-Fehler";
-const char PROGMEM twi_stuck_error[] = "TWI-Stop-Fehler";
+const char PROGMEM twi_error[] = "TWI-Fehler";
 const char PROGMEM promid_error[] = "PROM-ID-Fehler";
 const char PROGMEM crc_error[] = "CRC-Fehler";
 const char PROGMEM temp_outlier_error[] = "Temperatur-Fehler";
@@ -240,7 +260,6 @@ const char PROGMEM press_outlier_error[] = "Druck-Fehler";
 const char PROGMEM wakeup_error[] = "Aktivierungs-Fehler";
 const char PROGMEM state_error[] = "Zustands-Fehler";
 const char PROGMEM batt_error[] = "Batterie ist leer";
-const char PROGMEM too_long_error[] = "Zeit" uUML "berschreitungs-Fehler";
 const char PROGMEM brown_out_error[] = "Brown-Out-Fehler";
 const char PROGMEM undef_reason_error[] = "Undef-Restart-Fehler";
 const char PROGMEM osccal_error[] = "OSCCAL-Fehler";
@@ -251,6 +270,7 @@ const char PROGMEM recalib[] = "Restart!";
 const char PROGMEM greeting[] = "Press my button"; 
 const char PROGMEM explain[] = EXPLAIN_STR;
 const char PROGMEM message1[] = "Take me another";
+const char PROGMEM shortmessage1[] = "Another";
 const char PROGMEM message2[] = "feet up.";
 const char PROGMEM message3[] = "  ... You did it!";
 const char PROGMEM thanks[] = "Thanks!";
@@ -258,9 +278,7 @@ const char PROGMEM reveal[] = SUMMIT_STR;
 const char PROGMEM battweak[] = "Battery is weak!";
 const char PROGMEM bye[] = "Goodbye!";
 const char PROGMEM transport[] = "Transport mode";
-const char PROGMEM init_stuck_error[] = "Initialization stuck error";
-const char PROGMEM twi_connect_error[] = "TWI connection error";
-const char PROGMEM twi_stuck_error[] = "TWI stuck error";
+const char PROGMEM twi_error[] = "TWI error";
 const char PROGMEM promid_error[] = "PROM-id error";
 const char PROGMEM crc_error[] = "CRC error";
 const char PROGMEM temp_outlier_error[] = "Temperature error";
@@ -268,7 +286,6 @@ const char PROGMEM press_outlier_error[] = "Pressure error";
 const char PROGMEM wakeup_error[] = "Wakeup error";
 const char PROGMEM state_error[] = "State error";
 const char PROGMEM batt_error[] = "Battery empty";
-const char PROGMEM too_long_error[] = "Timeout error";
 const char PROGMEM brown_out_error[] = "Brown out error";
 const char PROGMEM undef_reason_error[] = "Undefinded restart error";
 const char PROGMEM osccal_error[] = "OSCCAL error";
@@ -276,10 +293,9 @@ const char PROGMEM intref_error[] = "INTREF error";
 const char PROGMEM fuse_error[] = "Fuse error";
 #endif
 
-const char* const PROGMEM error_message[ERROR_NUM] = { init_stuck_error, twi_connect_error, twi_stuck_error,
-						       promid_error, crc_error, temp_outlier_error, press_outlier_error,
-						       wakeup_error, state_error, batt_error, too_long_error,
-						       brown_out_error, undef_reason_error, osccal_error, intref_error, fuse_error };
+const char* const PROGMEM error_message[ERROR_NUM] = { twi_error, promid_error, crc_error, temp_outlier_error, press_outlier_error,
+						       wakeup_error, state_error, batt_error, brown_out_error, undef_reason_error,
+						       osccal_error, intref_error, fuse_error };
 /* program episode */
 #define SETUP_EPISODE 0
 #define MAIN_EPISODE 1
@@ -314,23 +330,25 @@ volatile byte laststate __attribute__ ((section (".noinit"))); // last state
 volatile byte episode __attribute__ ((section (".noinit"))); // program episode
 volatile unsigned int quartersecs __attribute__ ((section (".noinit"))); // quarter of seconds counted by wdt
 volatile unsigned long int wakemillis __attribute__ ((section (".noinit"))); // remember millis
+volatile bool wakeenable __attribute__ ((section (".noinit"))); // mark period when one can exit transport mode
+volatile bool clearstat  __attribute__ ((section (".noinit"))); // mark period when one can clear statistics 
 unsigned long int accumillis __attribute__ ((section (".noinit"))); // accumulated millis
 byte errcnt  __attribute__ ((section (".noinit"))); // global error counter
 int errcode  __attribute__ ((section (".noinit"))); // global error code
 byte mcusr __attribute__ ((section (".noinit"))); // mcu state at start
 volatile byte state __attribute__ ((section (".noinit"))); // state var
 unsigned int lastbump __attribute__ ((section (".noinit"))); // last bump in quarter seconds
-unsigned int lastchange __attribute__ ((section (".noinit"))); // last time, the state was changed
 float refPress __attribute__ ((section (".noinit"))); // reference pressure for 0 level
 unsigned int charcnt __attribute__ ((section (".noinit"))); // count displayed chars (for maintenance mode, deep sleep mode, and reset)
-byte resetlevel  __attribute__ ((section (".noinit"))); // after a few resets, recalibration is triggered
-byte transportlevel __attribute__ ((section (".noinit"))); // after a few resets, we change into transport mode
-byte statlevel __attribute__ ((section (".noinit"))); // after a few resets, stats are displayed
-byte wakelevel __attribute__ ((section (".noinit"))); // after a few resets, we awake from transport mode
+int resetlevel  __attribute__ ((section (".noinit"))); // after a few resets, recalibration is triggered
+int transportlevel __attribute__ ((section (".noinit"))); // after a few resets, we change into transport mode
+int statlevel __attribute__ ((section (".noinit"))); // after a few resets, stats are displayed
+int wakelevel __attribute__ ((section (".noinit"))); // after a few resets, we awake from transport mode
 float temperature __attribute__ ((section (".noinit"))); // needed for converting pressure into height
 float cf __attribute__ ((section (".noinit"))); // conversion factor for converting Pascals into decimeters
 bool summit_reached __attribute__ ((section (".noinit"))); // success!
 bool climbed __attribute__ ((section (".noinit"))); // tried!
+byte longmess __attribute__ ((section (".noinit"))); // number of times long message displayed
 
 #define EE_PARA (EE_INTREF-1) // from Vcc.h
 struct {
@@ -358,9 +376,13 @@ uint8_t pressed = false;
 float sample[MAXSAMPLE];
 float currPress = 0.0;
 char numbuf[16]; // for converting integers to strings
-int samplecnt = 0; // start measuring as soon as chars are displayed
+int samplecnt = -1; // start measuring when set to 0
 int remain; // remaining units to walk up
 MS5611lowpower sensor(&Wire);
+
+#if defined(DEBUG) && defined(__AVR_ATtiny1634__)
+TXOnlySerial mySerial(0);
+#endif
 
 /**************************** IRQ and RESET routines *************************************************/
 
@@ -410,7 +432,7 @@ inline void enable_wdt_setup(void)
 {
   DEBLN(F("enable_wdt_setup"));
 #ifdef DEBUG
-  wdt_enable(WDTO_8S);
+  wdt_enable(WDTO_2S);
 #else
   wdt_enable(WDTO_250MS);
 #endif
@@ -484,16 +506,20 @@ void disableVibIRQ(void)
    - External reset -> User requests a response (or we wake up from a sleep)
    - Brown-out reset: should not happen as we have not activated it.
  */
-void setup() {
+void setup(void) {
   byte reason;
-
+  
   DEBINIT();
   DEBLN(F("\nsendup V" VERSION));
   DEBLN(F("Setup..."));
-  DEBPR(F("episode="));
-  DEBLN(episode);
   DEBPR(F("state="));
   DEBLN(state);
+  DEBPR(F("we="));
+  DEBLN(wakeenable);
+ 
+#if 0
+  DEBPR(F("episode="));
+  DEBLN(episode);
   DEBPR(F("laststate="));
   DEBLN(laststate);
   DEBPR(F("quartersecs="));
@@ -508,7 +534,7 @@ void setup() {
   DEBLN(errcode);
   DEBPR(F("statlevel="));
   DEBLN(statlevel);
-
+#endif
 
   fake_mcusr(); // only necessary when running with bootloader
   reason = NO_REASON;
@@ -532,10 +558,8 @@ void setup() {
     rec_error(BROWN_OUT_ERROR);
     break;
   case WDR_SETUP_REASON:
-    rec_error(INIT_STUCK_ERROR);
-    break;
   case WDR_MAIN_REASON:
-    rec_error(TWI_STUCK_ERROR);
+    rec_error(TWI_ERROR);
     break;
   case EXTR_REASON:
     if (state == SLEEP_STATE || state == NO_STATE) {
@@ -546,6 +570,7 @@ void setup() {
     break;
   default:
     rec_error(UNDEF_RESTART_ERROR);
+    state = ERROR_STATE;
     break;
   }
   DEBLN(F("  Vars initialized"));
@@ -556,9 +581,9 @@ void setup() {
   if (pressed) { // check for repeated presses
     if (charcnt == 0) resetlevel++;
     else resetlevel = 0;
-    if (charcnt == transportlevel) transportlevel++;
+    if ((charcnt - 1) == transportlevel) transportlevel++;
     else transportlevel = 0;
-    if (charcnt >= 5 && charcnt <= 7) statlevel++;
+    if (charcnt == 5) statlevel++;
     else statlevel = 0;
   }
   charcnt = 0;
@@ -580,7 +605,7 @@ void setup() {
   DEBLN(F("  DOT Matrix display initialized"));
 
 
-#ifdef __AVR_ATtiny1634__
+#if defined(__AVR_ATtiny1634__ ) 
   if ((boot_lock_fuse_bits_get(GET_LOW_FUSE_BITS) != LOW_FUSE) ||
       (boot_lock_fuse_bits_get(GET_HIGH_FUSE_BITS) != HIGH_FUSE) ||
       (boot_lock_fuse_bits_get(GET_EXTENDED_FUSE_BITS) != EXT_FUSE)) rec_error(FUSE_ERROR);
@@ -595,6 +620,7 @@ void setup() {
   DEBLN(volt);
   episode = MAIN_EPISODE;
   enable_wdt_counting();
+  enableVibIRQ();
 }
 
 // start the MS5611 chip -- and if necessary recover from a non-fatal error
@@ -612,7 +638,7 @@ void start_ms5611(void)
     power_cycle();
     if (sensor.connect() > 0) {
       DEBLN(F("MS5611 connect failure"));
-      rec_error(TWI_CONNECT_ERROR);
+      rec_error(TWI_ERROR);
       continue;
     }
     sensor.ReadProm();
@@ -628,7 +654,7 @@ void start_ms5611(void)
     }
     break;
   }
-  wdt_reset(); // start fresh
+  wdt_reset(); // do not count this towards a WDT reset 
   DEBLN(F("    Leave MS5611 init"));
 }
 
@@ -652,6 +678,10 @@ void rec_error(byte err)
 
 void init_all_vars()
 {
+  // init error vars
+  errcnt = 0;
+  errcode = NO_ERROR;
+
   // read stat from EEPROM and initialize
   EEPROM.get(EE_STAT, stat);
   if (stat.totalsecs == 0xFFFFFFFF) {
@@ -668,11 +698,8 @@ void init_all_vars()
   if (para.intref == 0xFFFF) rec_error(INTREF_ERROR);
   laststate = NO_STATE;
   quartersecs = 0;
-  errcnt = 0;
-  errcode = NO_ERROR;
   state = WAKEUP_STATE;
   lastbump = 0;
-  lastchange = 0;
   refPress = 0.0;
   temperature = 0.0;
   cf = 0.0;
@@ -683,6 +710,9 @@ void init_all_vars()
   statlevel = 0;
   transportlevel = 0;
   resetlevel = 0;
+  longmess = 0;
+  wakeenable = false;
+  clearstat = false;
 }
 
 /**************************** The main loop *************************************************/
@@ -697,45 +727,56 @@ void loop()
   
   if (bumped || pressed) {
     lastbump =  getQuarterSeconds();
+    bumped = false;
+    DEBPR(F("."));
   }
 
   if (getQuarterSeconds() - lastbump > MINQUIET) state = BYE_STATE;
 
-  if (errcnt > MAXERRCNT || errcode >= FATAL_ERROR) state = ERROR_STATE;
-  if (transportlevel == 5) {
+  if (state != BYE_STATE && state != SLEEP_STATE)
+    if (errcnt > MAXERRCNT || errcode >= FATAL_ERROR)
+      state = ERROR_STATE;
+  
+  if (transportlevel >= MAXLEVEL) {
     state = TRANSPORT_STATE;
     wakelevel = 0;
   }
-  if (resetlevel >= 5) state = RESET_STATE;
-  if (statlevel >= 5) state = STATISTICS_STATE;
+  if (resetlevel >= MAXLEVEL) state = RESET_STATE;
+  if (statlevel >= MAXLEVEL)
+    state = STATISTICS_STATE;
 
   if (laststate != state) {
     DEBPR(F("New state: "));
     DEBLN(state);
     laststate = state;
-    lastchange = getQuarterSeconds();
   }
+  
   switch(state) {
 
   case RESET_STATE:
     resetlevel = 0;
     refPress = 0.0;
     temperature = 0.0;
-    samplecnt = -1;
     samplecnt = 0;
-    Dot5x7.scrollLeftString_P(recalib, SHOWMS*2, SCROLLMS, 1);
-    state = WAKEUP_STATE;
+    Dot5x7.scrollLeftString_P(recalib, SHOWMS*2, SCROLLMS*2, 1);
+    state = EXPLAIN_STATE;
     pressed = true;
     break;
 
   case BYE_STATE:
+    disable_wdt_counting();
+    DEBLN(F("Saying bye"));
+    samplecnt = -1;
     Dot5x7.scrollLeftString_P(bye, SHOWMS, SCROLLMS, 1);
     state = SLEEP_STATE;
-    // continue
+    // do not break but just fall through
     
   case SLEEP_STATE: // sleeping and waiting for a bump or reset to wake up
+    disable_wdt_counting();
     gosleep(true);
     rec_error(WAKEUP_ERROR); // should not happen!
+    state = ERROR_STATE;
+    Dot5x7.wakeup();
     break;
 
   case WAKEUP_STATE: // somebody was moving us 
@@ -743,17 +784,16 @@ void loop()
       state = EXPLAIN_STATE;
       pressed = false;
     } else { // nobody pressed the button: ask for it!
+      samplecnt = 0;
       for (byte i=0; i < GREETING_REPEAT; i++) {
 	DEBLN(i);
-	samplecnt = 0;
 	Dot5x7.scrollLeftString_P(greeting, SHOWMS, SCROLLMS, 1);
 	if (refPress >= 1.0) {
+	  pinMode(POWER,INPUT); // switch off power of MS5611 
 	  DEBPR(F("refPress="));
 	  DEBLN((long)refPress);
 	}
-	DEBLN(F("before idle"));
-	idleDelay(1500);
-	DEBLN(F("after idle"));
+	busyDelay(1500);
       }
       state = SLEEP_STATE;
     }
@@ -764,24 +804,29 @@ void loop()
        if (refPress > 1.0) state = CLIMB_STATE;
     }
     if (state == EXPLAIN_STATE) {
+      samplecnt = 0;
       for (byte i=0; i < EXPLANATION_REPEAT; i++) {
-	samplecnt = 0;
 	Dot5x7.scrollLeftString_P(explain, SHOWMS, SCROLLMS, 1);
 	if (refPress > 1.0) {
 	  DEBPR(F("refPress="));
 	  DEBLN((long)refPress);
 	}
-	idleDelay(1500);
+	busyDelay(1500);
       }
       if (refPress > 1.0) state = CLIMB_STATE;
     }
-    break;
+    if (state != CLIMB_STATE) break; // otherwise fall through with pressed=true!
 
   case CLIMB_STATE: // steadily climbing
     if (pressed) {
       climbed = true;
       samplecnt = 0;
-      Dot5x7.scrollLeftString_P(message1, SHOWMS, SCROLLMS, 1);
+      if (longmess++ < LONG_REPEAT) Dot5x7.scrollLeftString_P(message1, SHOWMS, SCROLLMS, 1);
+      else {
+	Dot5x7.scrollLeftString_P(shortmessage1, SHOWMS, SCROLLMS, 1);
+	while (samplecnt != -1) doMeasure();
+      }
+      if (samplecnt < 0) pinMode(POWER, INPUT); // switch off chip
       heightdiff = currentHeightDiff();
       if (heightdiff <= EPSILON) {
 	Dot5x7.scrollLeftString_P(message3, SHOWMS, SCROLLMS, 1);
@@ -797,34 +842,41 @@ void loop()
       pressed = false;
     } else {
       pinMode(POWER, INPUT); // switch off chip
-      sleepDelay(300UL*1000UL);
-      digitalWrite(DMCOL3, HIGH);
-      digitalWrite(DMROW4, LOW);
-      idleDelay(50);
-      digitalWrite(DMCOL3, LOW);
-      digitalWrite(DMROW4, HIGH);
+      sleepDelay(5UL*1000UL);
+      blink(50);
     }
     break;
 
   case THANKS_STATE:
-    	Dot5x7.scrollLeftString_P(thanks, SHOWMS, SCROLLMS, 1);
-	idleDelay(1000);
-	pressed = true;
-	state = SUMMIT_STATE;
-	// continue
+    pinMode(POWER, INPUT); // switch off chip
+    Dot5x7.scrollLeftString_P(thanks, SHOWMS, SCROLLMS, 1);
+    idleDelay(1000);
+    pressed = true;
+    state = SUMMIT_STATE;
+    // continue
 
   case SUMMIT_STATE: // reached the summit
     summit_reached = true;
+    samplecnt = 0;
+    start_ms5611();
     if (pressed) {
       Dot5x7.scrollLeftString_P(reveal, SHOWMS, SCROLLMS, 1);
       idleDelay(1000);
       if (volt < BATT_WEAK) Dot5x7.scrollLeftString_P(battweak, SHOWMS, SCROLLMS, 1);
+    } else {
+      while (samplecnt > 0) doMeasure();
     }
-    if (currentHeightDiff() < EPSILON*2) 
+    if (currentHeightDiff() > EPSILON*2) 
       state = CLIMB_STATE;
+    else {
+      sleepDelay(10000);
+      blink(50);
+    }
     break;
 
   case ERROR_STATE: // display error code
+    disable_wdt_counting(); // in order to avoid wdt loops
+    pinMode(POWER, INPUT); // switch off chip
     DEBPR(F("ercode="));
     DEBLN(errcode);
     state = BYE_STATE;
@@ -832,6 +884,7 @@ void loop()
     for (int i=0; i<ERROR_REPEAT; i++) {
       DEBLN(i);
       Dot5x7.scrollLeftString_P(errstr, SHOWMS, SCROLLMS, 1);
+      idleDelay(1000);
     }
     errcode = NO_ERROR;
     errcnt = 0;
@@ -843,29 +896,55 @@ void loop()
     state = DEEPSLEEP_STATE;
     wakelevel = 0;
     transportlevel = 0;
+    wakeenable = false;
     break;
 
   case DEEPSLEEP_STATE:
-    if (pressed && transportlevel) {
-      wakelevel++;
-      if (wakelevel >= 3) state = RESET_STATE;
-      transportlevel = 0;
-      wakelevel = 0;
-      break;
-    }
+    resetlevel = 0;
+    DEBPR(F("pr="));
+    DEBLN(pressed);
+    DEBPR(F("we="));
+    DEBLN(wakeenable);
+    DEBPR(F("wl="));
+    DEBLN(wakelevel);
+    DEBLN(F("-------"));
     if (pressed) {
-      transportlevel = 0;
-      sleepDelay(5000);
-      transportlevel = 1;
-      sleepDelay(5000);
-      transportlevel = 0;
+      if (wakeenable) {
+	wakelevel++;
+	DEBPR(F("wl="));
+	DEBLN(wakelevel);
+	idleDelay(500);
+	if (wakelevel >= 3) {
+	  state = RESET_STATE;
+	  break;
+	}
+      } else {
+	DEBLN(F("wl=0"));
+	wakelevel = 0;
+      }
+      wakeenable = false;
+      sleepDelay(4000);
+      blink(30);
+      DEBLN(F("we=1"));
+      wakeenable = true;
+      sleepDelay(10000);
+      blink(500);
+      DEBLN(F("we=0"));
+      DEBLN(F("wl=0"));
+      wakeenable = false;
+      wakelevel = 0;
     }
     gosleep(false);
     rec_error(WAKEUP_ERROR);
+    state = ERROR_STATE;
+    Dot5x7.wakeup();
     break;
 
   case STATISTICS_STATE:
     if (pressed && statlevel == 0) {
+      if (clearstat) {
+	clearStatistics();
+      }
       state = BYE_STATE;
       break;
     }
@@ -877,19 +956,23 @@ void loop()
     idleDelay(1000);
     scrollTimes(F("ON time: "), stat.totalsecs+(getQuarterSeconds()/4));
     scrollTimes(F("WAKE time: "), stat.wakesecs+(millis()/1000));
-    scrollNum(F("Wakeups:"), stat.totalwakeups);
-    scrollNum(F("Climbs:"), stat.totalclimbs);
-    scrollNum(F("Summits:"), stat.totalsummits);
-    scrollNum(F("Statistics:"), stat.totalstat);
+    scrollNum(F("Wakeups:"), stat.totalwakeups, false);
+    scrollNum(F("Climbs:"), stat.totalclimbs, false);
+    scrollNum(F("Summits:"), stat.totalsummits, false);
+    scrollNum(F("Statistics:"), stat.totalstat, false);
     idleDelay(2000);
     Dot5x7.scrollLeftString(F("ERRORS:"), SHOWMS, SCROLLMS, 1);
     none = true;
     for (byte i=NO_ERROR+1; i < ERROR_NUM; i++) 
       if (stat.errcnt[i] > 0) {
 	none = false;
-	scrollNum(pgm_read_word(&error_message[i]), stat.errcnt[i]);
+	scrollNum(pgm_read_word(&error_message[i]), stat.errcnt[i], true);
       }
     if (none) Dot5x7.scrollLeftString(F("none"), SHOWMS, SCROLLMS, 1);
+    idleDelay(2000);
+    clearstat = true;
+    Dot5x7.scrollLeftString(F("PRESS TO CLEAR! "), SHOWMS, SCROLLMS, 1);
+    clearstat = false;
     break;
     
   default: // somehow, the state var got a wrong value
@@ -898,7 +981,17 @@ void loop()
 
   }
   pressed = false;
-  bumped = false;
+}
+
+void blink(unsigned long period)
+{
+  Dot5x7.sleep();
+  digitalWrite(DMCOL3, HIGH);
+  digitalWrite(DMROW4, LOW);
+  idleDelay(period);
+  digitalWrite(DMCOL3, LOW);
+  digitalWrite(DMROW4, HIGH);
+  Dot5x7.wakeup();
 }
 
 /**************************** Measurement routines *************************************************/
@@ -939,12 +1032,14 @@ void doMeasure(void)
       sensval += sample[i];
       cnt++;
     }
-    if (refPress <= 1)  { // compute average over all temperature measurements
+    if (refPress <= 1)  { // compute average over all temperature measurements and compute cf
       refPress = sensval/cnt;
       temperature = temperature/MAXSAMPLE;
       cf = conversionFactor(START_HEIGHT_METERS, temperature); // conversion from Pascal to decimeters
     } else currPress = sensval/cnt;
     samplecnt = -1;
+    DEBPR(F("!"));
+    DEBPR(charcnt);
   }
 }
 
@@ -978,9 +1073,10 @@ void scrollTimes(const __FlashStringHelper *mess, unsigned long int secs)
   idleDelay(1000);
 }
 
-void scrollNum(const __FlashStringHelper *mess, int num)
+void scrollNum(const __FlashStringHelper *mess, int num, bool colon)
 {
   Dot5x7.scrollLeftString_P(reinterpret_cast<PGM_P>(mess), SHOWMS, SCROLLMS, 1);
+  if (colon) Dot5x7.scrollLeftString(F(":"), SHOWMS, SCROLLMS, 1);
   convertNum(num, numbuf);
   Dot5x7.scrollLeftString(numbuf, SHOWMS, SCROLLMS, 1);
   idleDelay(1000);
@@ -1046,10 +1142,8 @@ void busyDelay(unsigned long msecs)
   while (millis() - start < msecs) {
     wdtcnt_reset();
     remaining = msecs - (millis() - start);
-    if (refPress > 1) {
-    }
     if (samplecnt >= 0 && samplecnt <= MAXSAMPLE) { // last number triggers computing the average
-      if (remaining > 30) { // we can initiate a measurement
+      if (remaining > 30 && errcnt <= MAXERRCNT && errcode != FATAL_ERROR) { // we can initiate a measurement
 	doMeasure();
       } else idleDelay(remaining);
     } else idleDelay(remaining);
@@ -1073,6 +1167,8 @@ void sleepDelay(unsigned long msecs)
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_mode();
   }
+  Dot5x7.wakeup();
+  enableVibIRQ();
 }
 
 void gosleep(bool wakeup_on_bump)
@@ -1131,4 +1227,16 @@ void storeStatistics()
   if (climbed) stat.totalclimbs++;
   if (summit_reached) stat.totalsummits++;
   EEPROM.put(EE_STAT, stat);
+}
+
+void clearStatistics()
+{
+  DEBLN(F("clearstat"));
+  stat.totalsecs = 0;
+  stat.wakesecs = 0;
+  stat.totalwakeups = 0;
+  stat.totalclimbs = 0;
+  stat.totalsummits = 0;
+  stat.totalstat = 0;
+  for (byte i=0; i < ERROR_NUM; i++) stat.errcnt[i] = 0;
 }

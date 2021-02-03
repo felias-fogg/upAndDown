@@ -1,78 +1,85 @@
 setup: test all reasons
-- POR_REASON 1
-- EXTR_REASON 2
-- WDR_SETUP_REASON 3
-- WDR_MAIN_REASON 4
-- WDR_SLEEP_REASON 5
-- BOR_REASON 6
+* POR_REASON 1
+* EXTR_REASON 2
+* WDR_SETUP_REASON 3
+* WDR_MAIN_REASON 4
+* WDR_SLEEP_REASON 5
+* BOR_REASON 6
 
 errors:
-- INIT_STUCK_ERROR 0
-- TWI_CONNECT_ERROR 1
-- TWI_STUCK_ERROR 2
-- PROMID_ERROR 3
-- CRC_ERROR 4
-- TEMP_OUTLIER_ERROR 5
-- PRESS_OUTLIER_ERROR 6
-- WAKEUP_ERROR 7
-- STATE_ERROR 8
-- BATT_ERROR 9
-- TOO_LONG_ERROR 10
-- BROWN_OUT_ERROR 11
-- UNDEF_RESTART_ERROR 12
-- OSCCAL_ERROR 13
-- INTREF_ERROR 14
-- FUSE_ERROR 15
+* TWI_ERROR 
+* PROMID_ERROR 
+* CRC_ERROR 
+* TEMP_OUTLIER_ERROR 
+* PRESS_OUTLIER_ERROR 
+* WAKEUP_ERROR 
+* STATE_ERROR 
+* BATT_ERROR 
+* BROWN_OUT_ERROR 
+* UNDEF_RESTART_ERROR 
+* OSCCAL_ERROR 
+* INTREF_ERROR 
+* FUSE_ERROR 
 
 states entering:
-- BYE_STATE 1
-- SLEEP_STATE 2
-- WAKEUP_STATE 3
-- EXPLAIN_STATE 4
-- CLIMB_STATE 5
-- THANKS_STATE 6
-- SUMMIT_STATE 7
-- ERROR_STATE 8
-- TRANSPORT_STATE 9
-- DEEPSLEEP_STATE 10
-- RESET_STATE 11
-- STATISTICS_STATE 12
+* BYE_STATE 1
+* SLEEP_STATE 2
+* WAKEUP_STATE 3
+* EXPLAIN_STATE 4
+* CLIMB_STATE 5
+* THANKS_STATE 6
+* SUMMIT_STATE 7
+* ERROR_STATE 8
+* TRANSPORT_STATE 9
+* DEEPSLEEP_STATE 10
+* RESET_STATE 11
+* STATISTICS_STATE 12
 
 states leaving:
-- BYE_STATE 1 -> SLEEP_STATE
-- SLEEP_STATE 2 (-> WAKEUP_STATE)
-- WAKEUP_STATE 3 -> EXPLAIN_STATE, SLEEP_STATE
-- EXPLAIN_STATE 4 -> CLIMB_STATE
-- CLIMB_STATE 5 -> THANKS_STATE
-- THANKS_STATE 6 -> SUMMIT_STATE
-- SUMMIT_STATE 7 -> CLIMB_STATE
-- ERROR_STATE 8 -> BYE_STATE
-- TRANSPORT_STATE 9 -> DEEP_SLEEP_STATE
-- DEEPSLEEP_STATE 10 -> RESET_STATE
-- RESET_STATE 11 -> WAKEUP_STATE
-- STATISTICS_STATE 12 -> BYE_STATE
-- additinonally, every state can be left by waiting MINQUIET time
-  -> BYE_STATE
+* BYE_STATE 1 *> SLEEP_STATE
+* SLEEP_STATE 2 (*> WAKEUP_STATE)
+* WAKEUP_STATE 3 *> EXPLAIN_STATE  *> SLEEP_STATE
+* EXPLAIN_STATE 4 *> CLIMB_STATE
+* CLIMB_STATE 5 *> THANKS_STATE *> SLEEP_STATE
+* THANKS_STATE 6 *> SUMMIT_STATE
+* SUMMIT_STATE 7 *> CLIMB_STATE
+* ERROR_STATE 8 *> BYE_STATE
+* TRANSPORT_STATE 9 *> DEEP_SLEEP_STATE
+* DEEPSLEEP_STATE 10 *> RESET_STATE
+* RESET_STATE 11 *> WAKEUP_STATE
+* STATISTICS_STATE 12 *> BYE_STATE
+* additinonally, every state can be left by waiting MINQUIET time
+  *> BYE_STATE
 
 height computation:
-- metric
+* metric
 - imperial
-- epsilon!
+* epsilon!
 
 bump recognition:
-- check by testing timeout
+* check by testing timeout
 
 special entries using RESET press codes:
-- transport
-- reset
-- statistics
+* transport
+* reset
+* statistics
 
 statistics taken:
-- totalsecs
-- wakesecs
-- totalwakeups
-- totalclimbs
-- totalsummits
-- totalstat
+* totalsecs
+* wakesecs
+* totalwakeups
+* totalclimbs
+* totalsummits
+* totalstat
 
-- error recovery (power cycling)
+* error recovery (power cycling)
+
+Power consumption:
+MCU active (everything else shut off):
+MCU idle (everything else shut off):
+MCU sleeping completely:
+MCU sleeping with WDT:
+MCU idle/active measuring (display off):
+Displaying X (measuring):
+Displaying X (being idle):
+
