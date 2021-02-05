@@ -19,7 +19,7 @@
      is cleared.
 */
 
-#define VERSION "5.0.2"
+#define VERSION "5.0.3"
 //#define DEBUG
 
 /* Version 0.9 - first version out in the wild
@@ -87,16 +87,25 @@
  *           - All in all, pretty much of the program has been rewritten.
  *
  * Version 5.0.2 (3.2.2021)
- *           - switched to TXOnlySerial for serial debug communication
+ *           - switched to TXOnlySerial for serial debug communication (saves some space and appears to work more consistently)
+ * 
+ * Version 5.0.3 (5.2.2021)
+ *          - modified the code so that there can be one sketch that is based on different MyMS5611 include files
+ *            which cater for the original OPEN-V4 board as well as for the new OPEN-V4A board! You have two different 
+ *            folders, but they have the identical sketch (using soft links!)
+ *          - found a problem in the Tiny1634: if you go in power-down mode and leave the PB3 port pin as an output in the 
+ *            high state, the chip will draw 0.4mA instead of 100nA! Simply setting the output to low is good enough to
+ *            get around this problem.
  */
+
+#include "MyMS5611.h"
 
 #include <avr/wdt.h>
 #include <avr/sleep.h>
 #include <avr/pgmspace.h>
 #include <avr/boot.h>
-#include <Wire.h>
+#include <avr/power.h>
 #include <PETPreformBoard.h>
-#include "MS5611lowpower.h"
 #include <EEPROM.h>
 #include <DotMatrix5x7.h>
 #include <Vcc.h>
@@ -106,7 +115,7 @@
 #endif
 
 // Fuse settings:
-#define LOW_FUSE 0x62 // divide clock by 8, use internal ascillator
+#define LOW_FUSE 0x62 // divide clock by 8, use internal oscillator
 #define HIGH_FUSE 0xD7 // SPI enabled, EEPROM preservation
 #define EXT_FUSE 0xFF
 
@@ -200,8 +209,8 @@
 #endif
 
 #define MAXERRCNT 5 // after that many errors we give up
-#define BATT_WEAK 2400 // warning that battery is low
-#define BATT_EMPTY 2100 // battery almost empty, give error!
+#define BATT_WEAK 2800 // warning that battery is low
+#define BATT_EMPTY 2600 // battery almost empty, give error!
 
 /* Debug macros */
 #ifdef DEBUG
@@ -378,7 +387,8 @@ float currPress = 0.0;
 char numbuf[16]; // for converting integers to strings
 int samplecnt = -1; // start measuring when set to 0
 int remain; // remaining units to walk up
-MS5611lowpower sensor(&Wire);
+
+MyMS5611 sensor;
 
 #if defined(DEBUG) && defined(__AVR_ATtiny1634__)
 TXOnlySerial mySerial(0);
@@ -451,8 +461,10 @@ inline void disable_wdt_counting(void)
 {
   episode = SLEEPING_EPISODE; // so an early RESET leads to a restart
   wdt_reset();
-  WDTCSR &= ~(1<<WDIE); // Important! Otherwise WDT continues to be triggered
-  wdt_disable();
+#ifdef __AVR_ATtiny1634__
+  CCP = 0xD8;
+#endif
+  WDTCSR = 0; // Important! Otherwise WDT continues to be triggered
   wdtcnt = 0;
 }
 
@@ -514,8 +526,6 @@ void setup(void) {
   DEBLN(F("Setup..."));
   DEBPR(F("state="));
   DEBLN(state);
-  DEBPR(F("we="));
-  DEBLN(wakeenable);
  
 #if 0
   DEBPR(F("episode="));
@@ -615,12 +625,24 @@ void setup(void) {
 
   volt = Vcc::measure(10);
   if (volt < BATT_EMPTY) rec_error(BATT_ERROR);
-
+  
   DEBPR(F("  Voltage checked: "));
   DEBLN(volt);
+  powerdown_unused();
   episode = MAIN_EPISODE;
   enable_wdt_counting();
   enableVibIRQ();
+}
+
+// power down all unused hardware modules;
+void powerdown_unused()
+{
+  ADCSRA = 0; // disable ADC
+  power_adc_disable();
+#ifdef __AVR_ATtiny1634__
+  power_usart0_disable();
+  power_usart1_disable();
+#endif
 }
 
 // start the MS5611 chip -- and if necessary recover from a non-fatal error
@@ -1178,6 +1200,7 @@ void gosleep(bool wakeup_on_bump)
   disableVibIRQ();   // disable IRQs
   pinMode(POWER, INPUT); // powerdown the MS5611
   Dot5x7.sleep(); // disable display
+  digitalWrite(14, LOW); // if this pin (PB3) stayed high, then the MCU draws 0.45 mA in powerdown mode!!!
   storeStatistics(); // store the current statistics
   disable_wdt_counting(); // no more timing
 #ifdef DEBUG
@@ -1186,8 +1209,6 @@ void gosleep(bool wakeup_on_bump)
   DEBLN(episode);
   DEBPR(F("state="));
   DEBLN(state);
-  DEBPR(F("laststate="));
-  DEBLN(laststate);
   DEBPR(F("quartersecs="));
   DEBLN(quartersecs);
   DEBPR(F("wakemillis="));

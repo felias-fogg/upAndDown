@@ -1,15 +1,20 @@
 /* This is a specialization of the MS5611 class that permits a 
-   user specified delay function.
+   user specified delay function. It also includes the Wire lib and
+   instatiates the class with the Wire instance! We do not have to this
+   in the sketch anymore and can remove the inclusion of the Wire lib 
+   from the sketch.
+   
+   This makes it possible to use the sketch (in different environments) 
+   with the Wire lib as well as with the SoftWire lib (using different I2C pins!)
 */
+#include "MyMS5611.h"
 
-#include "MS5611lowpower.h"
-
-MS5611lowpower::MS5611lowpower(TwoWire *aWire) : MS5611(aWire){
+MyMS5611::MyMS5611(void) : MS5611(&Wire){
 	setI2Caddr(I2C_MS5611);
 }
 
 
-unsigned long MS5611lowpower::read_adc(unsigned char aCMD)
+unsigned long MyMS5611::read_adc(unsigned char aCMD)
 {
   unsigned long value=0;
   unsigned long c=0;
@@ -41,7 +46,7 @@ unsigned long MS5611lowpower::read_adc(unsigned char aCMD)
   return value;
 }
 
-void MS5611lowpower::setDelayFunction(void (*f) (long unsigned int))
+void MyMS5611::setDelayFunction(void (*f) (long unsigned int))
 {
   _delay = f;
 }

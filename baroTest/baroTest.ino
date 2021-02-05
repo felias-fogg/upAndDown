@@ -1,17 +1,17 @@
 // Sketch to test MS5611 on OpenV4 board
 
-//#define USEDOTMATRIX 
+#define USEDOTMATRIX 
 #include <stdio.h>
+#define PPB_VERSION4 '0'
 #include <PETPreformBoard.h>
 #include <DotMatrix5x7.h>
-#include <MS5611.h>
-#include <Wire.h>
+#include "MyMS5611.h"
 
 #define SHOWTIME 700
 #define SCROLLTIME 50
 #define SCROLLOFFSET 1
 
-MS5611 sensor(&Wire);
+MyMS5611 sensor;
 
 void setup()
 {
@@ -74,6 +74,7 @@ void loop()
   sprintf(str, "Temp: %d.%d" "°" "C", deg, decimaldeg);
   Serial.println(str);
 #ifdef USEDOTMATRIX    
+  sprintf(str, "Temp: %d.%d" DEGREE "C", deg, decimaldeg);
   Dot5x7.scrollLeftString(str, SHOWTIME, SCROLLTIME, SCROLLOFFSET);
   delay(2000);
 #endif

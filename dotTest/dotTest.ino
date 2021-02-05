@@ -1,6 +1,7 @@
 // -*- c++ -*-
 // Sketch to test dot matrix display on OPEN-V4 board
 #include <DotMatrix5x7.h>
+#define PPB_VERSION4 '0'
 #include <PETPreformBoard.h>
 #include "testfont.h"
 

@@ -20,11 +20,13 @@ In addition you need the following sketches to tune the OSCCAL and thte INTREF v
 The directory contains the following sketches:
 
 * *archive*: the old sketch (using an attiny84 and a 7-segment display)
-* *baroTest*: a sketch to the the barometer breakout 
+* *baroTest*: a sketch to test the barometer breakout 
 * *dotTest*: a sketch to test the dot matrix display
 * *fontTest*: a sketch to interactively display characters
 * *measureHeight*: a sketch that measures the relative height
 * *sendup*: the target sketch
-* *sendup0*: the same sketch, but tailored for the 0-version of the PET preform board
+* *sendup0*: the same sketch, but tailored for the 0-version of the PET preform board based on the SoftI2CMaster library. The sketch is actually identical (using a soft link). The environment is different though. The accompanying MyMS5611 header and source files are quite different.
 
-In addition, *BOM.md* contains the bill of materials.
+In addition, *BOM.md* contains the bill of materials (with actual prices and sources).
+
+As a side remark, I would like to add that I found an undocumented silicon bug on the ATtiny1634 when developing this piece of software. When you configure PB3 (Arduino pin 14) as output, set it to high level, disable the watch dog counter, and put the MCU to sleep, then the MCU will draw 0.5 mA instead of 100nA! that is  roughly 5000 times more than promised! 

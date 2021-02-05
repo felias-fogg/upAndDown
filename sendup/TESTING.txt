@@ -75,11 +75,8 @@ statistics taken:
 * error recovery (power cycling)
 
 Power consumption:
-MCU active (everything else shut off):
-MCU idle (everything else shut off):
-MCU sleeping completely:
-MCU sleeping with WDT:
-MCU idle/active measuring (display off):
-Displaying X (measuring):
-Displaying X (being idle):
+MCU idle (everything else shut off): 0.9 mA
+MCU sleeping completely: 200 nA (10M)
+MCU sleeping with WDT: 5 microA
+MCU active measuring and displaying: 6 mA
 
